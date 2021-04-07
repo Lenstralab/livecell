@@ -1,0 +1,16 @@
+tqdm
+psutil
+tifffile
+untangle
+pandas
+javabridge
+matplotlib
+scipy
+scikit_image
+numpy
+python_bioformats
+bioformats
+Pillow
+PyYAML
+SimpleITK
+skimage
