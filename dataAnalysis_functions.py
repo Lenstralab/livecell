@@ -20,6 +20,7 @@ if 'verbose' not in globals(): verbose=1;
 ### Numerical computations
 
 ### Compute all crosscorrelations G
+"""Antoine Coulon, 2020. <antoine.coulon@curie.fr>"""
 def compG_multiTau(v,t,n=8,ctr=1):
     """v: data vector (channels=rows), t: time, n: bin every n steps.\n--> Matrix of G, time vector"""
     def compInd(v1,v2):
