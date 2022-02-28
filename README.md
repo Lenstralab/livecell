@@ -11,7 +11,7 @@ Install git: https://git-scm.com/
     git checkout 1edd8b572ebc9944618fe48c23060bb3b6d3b1a3
 
 # Code used for Brouwer et al.
-    git checkout 
+    git checkout d521de19239cd95a4decc091751b47b94542a31c
 
 ## Installation
 If not done already:
