@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+
+from LiveCellAnalysis.pipeline_livecell_track_movies import main
+
+if __name__ == '__main__':
+    main()

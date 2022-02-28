@@ -1,11 +1,10 @@
 #!/usr/bin/python
 
-import sys, os, shutil, yaml, copy, tifffile
+import sys, os, yaml
 import numpy as np
-from datetime import datetime
-from misc import getConfig
-from pipeline_livecell_correlationfunctions import pipeline_correlation_functions
-from wimread import imread
+from tllab_common.misc import getConfig
+from LiveCellAnalysis.pipeline_livecell_correlationfunctions import pipeline_correlation_functions
+from tllab_common.wimread import imread
 
 fname = os.path.realpath(__file__)
 test_files = os.path.join(os.path.dirname(fname), 'test_files')
@@ -23,30 +22,16 @@ test_files = os.path.join(os.path.dirname(fname), 'test_files')
 #
 #wp@tl20200124
 
-## ------ first some tests to explain the principle -----
 
-def test_sum():
-    assert sum([1, 2, 3])==6, "Should be 6"
-
-def test_sum_tuple():
-    assert sum((1, 2, 2))==5, "Should be 5"
-    
-def test_sum_np():
-    assert np.sum(np.array((1, 2, 3)))==6, 'Should be 6'
-    
-## ----- Then real tests ----- add your tests here -----
-
+## ----- add your tests here -----
     
 def make_test_pipeline_CF(parameter_file):
-    def pipeline_fun():
-        date = datetime.now().strftime('%Y%m%d_%H%M%S')
-        outputfolder = os.path.join(test_files, 'test_results_{}_{}'.format(os.path.splitext(parameter_file)[0], date))
+    def pipeline_fun(tmp_path):
+        tmp_path = str(tmp_path)
         parameters = getConfig(os.path.join(test_files, parameter_file))
-        parameters['outputfolder'] = outputfolder
-        tmp_parameter_file = os.path.join(outputfolder, 'params.yml')
+        parameters['outputfolder'] = tmp_path
+        tmp_parameter_file = os.path.join(tmp_path, 'params.yml')
 
-        if not os.path.exists(outputfolder):
-            os.makedirs(outputfolder)
         with open(tmp_parameter_file, 'w') as f:
             yaml.dump(parameters, f)
 
@@ -59,8 +44,6 @@ def make_test_pipeline_CF(parameter_file):
         for file in files:
             assert os.path.exists(parameters['file']+'_'+file),\
                 'File {} has not been generated'.format(parameters['file']+'_'+file)
-
-        shutil.rmtree(parameters['outputfolder'], True)
     return pipeline_fun
 
 #test_linda  = make_test_pipeline_CF('pipeline_livecell_CF_Linda.yml')
@@ -71,7 +54,7 @@ test_heta   = make_test_pipeline_CF('pipeline_livecell_correlationfunctions_Heta
     
 if __name__ == '__main__':
     if len(sys.argv)<2:
-        py = ['2']
+        py = ['3.8']
     else:
         py = sys.argv[1:]
 

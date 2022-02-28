@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+
+from LiveCellAnalysis.pipeline_livecell_correlationfunctions import main
+
+if __name__ == '__main__':
+    main()

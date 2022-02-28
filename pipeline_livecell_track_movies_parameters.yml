@@ -10,32 +10,38 @@
 #  -outputfolder: full path of folder where analyzed data should be written. Example: "/DATA/lenstra_lab/XXXX/LiveCell_analysis/"
 
 #pathIn:
-folderIn: "/DATA/lenstra_lab/u.gowthaman/data/livecell_data/"
-expList: ["20191114/YTL1113_glu_1", "20191114/YTL1113_glu_2", "20191114/YTL1113_glu_3", "20191114/YTL1113_glu_4", "20191114/YTL1113_glu_5", "20191114/YTL1113_glu_6", "20191114/YTL1113_glu_7", "20191114/YTL1113_glu_8", "20191114/YTL1113_glu_9", "20191124/YTL1113_Glu_1", "20191124/YTL1113_Glu_2", "20191124/YTL1113_Glu_3", "20191124/YTL1113_Glu_4", "20191124/YTL1113_Glu_5", "20191124/YTL1113_Glu_6", "20191114/YTL1117_glu_1", "20191114/YTL1117_glu_2", "20191114/YTL1117_glu_3", "20191114/YTL1117_glu_4", "20191114/YTL1117_glu_5", "20191114/YTL1117_glu_6", "20191114/YTL1117_glu_7"]
-outputfolder: "/DATA/lenstra_lab/u.gowthaman/analysis/livecell_analysis/"
+folderIn: ''
+
+
+expList: ['']
+
+outputfolder: ''
+
 
 #### specify which part of the code you want to run
 #  -MaxProj: 0 or 1. note: If manually made with FIJI, order or channels may be different and the number of timeframes may not be read correctly in python
 #  -CellMask: 0 or 1. Makes cell mask. For 2 color data, uses green (2nd) channel
-#  -OptimizeThreshold: 0 or 1. Create graphs with different thresholds (4-13) of nr of detected spots and nr of cells with spots
 #  -RunLocalize: 0 or 1. To find the localization spots (needs max.tif and sum_cells_mask.tif or TSregfiles(see below) either by functions above or by manual selection of ROIs). Remove old .npy files if you want to rerun.
 #  -CalculateBackground: 0 or 1. Calculate background at 4 positions at fixed distance (5 pixels in x and y) from TS. 
 #  -WriteFiles: 0 or 1. Writes files (metadatahead, list.py and pdfs of tracks). Old list.py file will not be overwritten, so remove it you want to remake it.
 #  -WriteMovies: 0 or 1. Creates a movie of the found spots.
 #  -ComputeCorrelFunc: 0 or 1. Performs auto and cross correlation. For better results use pipeline_livecell_correlationfunctions
 #  -RegisterChannels: 0 or 1. Experimental. Corrects for aberrations between channels. A file (name starting with 'beads') with a z-stack with beads should be in pathIn.
-
-MaxProj: 0
-CellMask: 0
-OptimizeThreshold: 0
-RunLocalize: 0
-CalculateBackground: 1
-WriteFiles: 0
-WriteMovies: 0
-ComputeCorrelFunc: 0
 RegisterChannels: 0
 
-#### specify general analysis paramaters
+CorrectDrift: [1]
+
+MaxProj: 1
+CellMask: 1
+OptimizeThreshold: 1
+RunLocalize: 1
+CalculateBackground: 1
+WriteFiles: 1
+WriteMovies: 1
+
+ComputeCorrelFunc: 0
+
+#### specify general analysis parameters
 #  -ChannelsToAnalyze: Provide list of channels to analyze: [0] = red channel, [1] is green channel, [0,1] is red and geen. For 1-color data: [0]
 #  -swapColors: if 0, the script assumes channel 1 is red and channel 2 is green. If this is reversed, set swapColors to 1.
 #  -fillIn: 0 or 1: fills in/determines intensity of spot at or around TS location in other channel.
@@ -44,11 +50,11 @@ RegisterChannels: 0
     # -"red": tracks green channel and uses green TS location to determine intensity in red channel.
     # -"green": tracks red channel and uses red TS location to determine intensity in green channel
 
-ChannelsToAnalyze: [0,1]
+ChannelsToAnalyze: [0]
 swapColors: 0
-fillIn: 1
-fillInRadius: 5
-fillInColors: "red"
+fillIn: 0
+fillInRadius: 0
+fillInColors: 'red'
 
 #### parameters for max projection,  and metadata:
 #  -zSlices: nr z slices. Example: 9
@@ -57,14 +63,15 @@ fillInColors: "red"
 #  -timeInterval: time inteval between frame in seconds. Only used for spinningDisk
 
 zSlices: 9
-frames: 60
-microscope: "AxioObserver"
-timeInterval: 
+frames: 240
+microscope: AxioObserver
+timeInterval: 15
 
 #### parameters for findCells:
 #  -findCellsCCdist: distance between cells, example for yeast: 25, example for mammalian cells: 100
 
 findCellsCCdist: 25
+findCellsThr: 
 
 #### Localize parameters
 #  The script finds spots in 2 steps with high and low thesholds. First it will find the most intense spots using the "thresholdSD" threshold. Second, it will find spots with a lower threshold ("thresholdSD"-"diffThresholdSD") in the vicinity of high intensity spots (with distance threshold "dist"). Lastly, it will fill in frames that don't have spot about both thresholds by using the xy location of the first burst or the previous burst.
@@ -74,10 +81,10 @@ findCellsCCdist: 25
 #  -diffThresholdSD: difference high - low threshold. Example: 2
 #  -writeLocTifFiles: set to 1 if you want to write movies of all the spots found for the low and high threshold. It may crash if you have many timeframes.
 
-thresholdSD_Red: 
-thresholdSD_Green:
-diffThresholdSD:
-writeLocTifFiles:
+thresholdSD_Red: 6
+thresholdSD_Green: 8
+diffThresholdSD: 2
+writeLocTifFiles: 1
 
 #### Fitting parameters for PSF
 #  -psfPx: PSF width in pixels. Example: 2.
@@ -86,10 +93,10 @@ writeLocTifFiles:
 #  -dist: maximal distance in pixels tolerated between previous spot (from higher threshold) and spot found with lower threshold. Example: 5
 #  -winSize: window size in pixels used for fitting PSF. Example: 5
 
-psfPx: 2
-maxDist: 3
-minSeparation: 1
-dist: 5
+psfPx: 2.
+maxDist: 3.
+minSeparation: .1
+dist: 10
 winSize: 5
 
 #### variable masking parameters
@@ -99,9 +106,9 @@ winSize: 5
 #  -TSregRadius: number of pixels in which to find TS around prelocated TS file.
 
 TSregfile: []
-TSregRadius: 
+TSregRadius: 10
 
 #### movie parameters
 #  -sideViews: 0 = no sideview, = 1 sideViews in the movies
 
-sideViews: 0
+sideViews: 1
