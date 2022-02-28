@@ -20,7 +20,7 @@ If not done already:
 
 Then install the livecell script (up to 5 minutes):
 
-    pip install -e livecell_analysis --user
+    pip install -e . --user
 
 ## Usage
 ### Track Movies

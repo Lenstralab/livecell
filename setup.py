@@ -8,7 +8,7 @@ with open('README.md', 'r') as fh:
 
 setuptools.setup(
     name='livecellanalysis',
-    version='2021.12.0',
+    version='2022.2.0',
     author='Lenstra lab NKI',
     author_email='t.lenstra@nki.nl',
     description='Live cell analysis code for the Lenstra lab.',
