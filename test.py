@@ -1,11 +1,14 @@
 #!/usr/bin/python
 
-import sys, os, shutil, yaml, copy
-import numpy as np
-from tllab_common.misc import getConfig
-from LiveCellAnalysis.pipeline_livecell_track_movies import pipeline, getPaths, calculate_general_parameters
+import sys
+import os
+import shutil
+import yaml
+import copy
+from LiveCellAnalysis.pipeline_livecell_track_movies import pipeline, getPaths, expandExpList
 import tllab_common
 from tllab_common.wimread import imread
+from tllab_common.misc import getConfig
 
 fname = os.path.realpath(__file__)
 test_files = os.path.join(os.path.dirname(fname), 'test_files')
@@ -36,7 +39,7 @@ def make_test_pipeline(parameter_file):
             yaml.dump(parameters, f)
         if parameters['TSregfile']:
             p = copy.deepcopy(parameters)
-            calculate_general_parameters(p, parameter_file)
+            p = expandExpList(p, parameter_file)
             for exp in range(0, p['lenExpList']):
                 p['pathIn'] = p['expList'][exp]
                 getPaths(p)

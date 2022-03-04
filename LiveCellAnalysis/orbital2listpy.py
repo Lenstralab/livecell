@@ -165,7 +165,7 @@ def save_trks(file, trk_folder=None, includeZ=False, fw_start=50):
             with lfdfiles.SimfcsBin(bin_file + '.bin') as b:
                 bin_data = np.reshape(b.asarray(), (-1, Npts)).T
         else:
-            raise Exception('Bin file does not exist for channel {}'.format(i))
+            raise Exception('Bin file {} does not exist for channel {}'.format(bin_file, i))
 
         fig.add_subplot(gs[i, 0])
         plt.imshow(bin_data)

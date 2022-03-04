@@ -1,9 +1,10 @@
 #!/usr/bin/python
 
-import sys, os, yaml
-import numpy as np
-from tllab_common.misc import getConfig
+import sys
+import os
+import yaml
 from LiveCellAnalysis.pipeline_livecell_correlationfunctions import pipeline_correlation_functions
+from tllab_common.misc import getConfig
 from tllab_common.wimread import imread
 
 fname = os.path.realpath(__file__)
@@ -37,7 +38,8 @@ def make_test_pipeline_CF(parameter_file):
 
         parameters = pipeline_correlation_functions(tmp_parameter_file)
 
-        files = ('pipeline_livecell_correlationfunctions.py', 'autocorrelation_fit_red_uncorrected.pdf', 'correlation_functions.pdf','Heatmap_analog.pdf')
+        files = ('pipeline_livecell_correlationfunctions.py', 'autocorrelation_fit_red_uncorrected_analog.pdf',
+                 'correlation_functions_analog.pdf', 'Heatmap_analog.pdf')
 
         assert os.path.exists(parameters['outputfolder']), 'Output folder has not been generated'
         assert len(os.listdir(parameters['outputfolder']))>4, 'There aren''t enough files in the output folder'

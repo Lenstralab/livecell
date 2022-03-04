@@ -13,6 +13,7 @@ from tllab_common.tiffwrite import IJTiffWriter
 from tllab_common.misc import objFromDict
 from parfor import parfor
 import hidden_markov
+from itertools import product
 
 if __package__ is None or __package__=='': #usual case
     from listpyedit import listFile
@@ -203,9 +204,10 @@ def loadExpData(fn, nMultiTau=8, ignore_comments=False):
     for a in tqdm(lf, desc='Loading experimental data'):
         d = objFromDict(**{})
         #    d.path=procDataPath
-        if 'trk_r' in a:  d.trk_r=np.loadtxt(a.trk_r)
-        if 'trk_g' in a:  d.trk_g=np.loadtxt(a.trk_g)
-        if 'trk_b' in a:  d.trk_b=np.loadtxt(a.trk_b)
+
+        colors = [c for c in 'rgbkcmyw' if f'trk_{c}' in a]
+        for c in colors:
+            d[f'trk_{c}'] = np.loadtxt(a[f'trk_{c}'])
 
         if 'detr' in a: # Columns of detr: frame, red mean, red sd, green mean, green sd, red correction raw, red correction polyfit, green correction raw, green correction polyfit
             d.detr=np.loadtxt(a.detr)
@@ -223,14 +225,14 @@ def loadExpData(fn, nMultiTau=8, ignore_comments=False):
         if 'rawPath' in a: d.rawPath=a.rawPath
         if 'rawTrans' in a: d.rawTrans=a.rawTrans
 
-        if 'fcs_rr' in a: d.fcs_rr=np.loadtxt(a.fcs_rr,skiprows=7)
-        if 'fcs_gg' in a: d.fcs_gg=np.loadtxt(a.fcs_gg,skiprows=7)
-        if 'fcs_rg' in a: d.fcs_rg=np.loadtxt(a.fcs_rg,skiprows=7)
-        if 'fcs_gr' in a: d.fcs_gr=np.loadtxt(a.fcs_gr,skiprows=7)
+        for i, j in product(colors, colors):
+            if f'fcs_{i}{j}' in a:
+                d[f'fcs_{i}{j}'] = np.loadtxt(a[f'fcs_{i}{j}'], skiprows=7)
 
-        if 'trk_r' in a:  d.name=a.trk_r.replace('_red.txt','').replace('_green.txt','').replace('.txt','')
-        if 'trk_g' in a:  d.name=a.trk_g.replace('_green.txt','').replace('_red.txt','').replace('.txt','')
-        if 'trk_b' in a:  d.name=a.trk_b.replace('_blue.txt','').replace('_blue.txt','').replace('.txt','')
+        try:
+            d.name = re.findall('^(.*)_[^_]+\.txt$', a[f'trk_{colors[0]}'])[0]
+        except Exception:
+            d.name = a[f'trk_{colors[0]}']
 
         if 'ctrlOffset' in a:  d.ctrlOffset=np.array(a.ctrlOffset)
         if 'transfLev' in a:  d.transfLev=np.array(a.transfLev)
@@ -248,31 +250,26 @@ def loadExpData(fn, nMultiTau=8, ignore_comments=False):
         # else:
         #     print("!! Warning: No metadata and no dt provided. Using dt=1."); d.dt=1.
 
-        if a.trk_r.endswith('trk'):  # orbital
-            d.t = d.trk_r[:, -1] * d.dt
-            d.r = d.trk_r[:, -2]
-            d.g = d.trk_g[:, -2]
-            if 'trk_b' in d:
-                d.b = d.trk_b[:, -2]
-        else:  # widefield
-            d.t = d.trk_r[:, -2] * d.dt
-            d.r = d.trk_r[:, -3]
-            d.g = d.trk_g[:, -3]
-            if 'trk_b' in d:
-                d.b = d.trk_b[:, -3]
+        i = 1 if a.trk_r.endswith('trk') else 2  # orbital vs widefield files
+        d.t = d[f'trk_{colors[0]}'][:, -i] * d.dt
+
+        for c in colors:
+            d[c] = d[f'trk_{c}'][:, -(i + 1)]
+
         if 'detr' in d: # Detrending from s.d. polyfit
-            d.r=d.r/d.detr[:,6]
-            d.g=d.g/d.detr[:,8]
+            for c, i in zip('rg', (6, 8)):
+                if c in d:
+                    d[c] /= d.detr[:, i]
 
         if not 'frameWindow' in d:
-            d.frameWindow=[0,d.t.shape[0]]
+            d.frameWindow=[0, d.t.shape[0]]
         else:
             if d.frameWindow[0]<0:
                 d.frameWindow[0] = 0
             if d.frameWindow[1] > d.t.shape[0]-1:
                 d.frameWindow[1] = d.t.shape[0]-1
 
-        if nMultiTau != 0:
+        if nMultiTau != 0:  # TODO: consider more colors than just rg
             if d.frameWindow[1]-d.frameWindow[0]:
                 d.fcsRecomp=True
                 d.G, d.tau = compG_multiTau(np.c_[d.r,d.g][d.frameWindow[0]:d.frameWindow[1]].T, d.t[d.frameWindow[0]:d.frameWindow[1]], 0)
@@ -384,10 +381,6 @@ def showTracking(Data, channels=None, expPathOut=None, sideViews=None, zSlices=N
         maxFileExists = False
 
     with imr(pathIn, transform=transform) as raw, imr(maxFile, transform=transform) as mx:
-        mx.masterch = raw.masterch
-        mx.slavech  = raw.slavech
-        mx.detector = raw.detector
-
         channels = channels or np.arange(raw.shape[2])
         nCh = min(len(channels), 3)
         if sideViews is None:

@@ -74,7 +74,7 @@ def main():
 
     ASL, t = zip(*[bootstrap_hypothesis_testing(y[:,i], z[:,i], args.bootstraps, args.mode) for i in range(y.shape[1])])
 
-    print('ASL: {}'.format(ASL))
+    print('ASL: ' + ' '.join(['{:.5e}'] * len(ASL)).format(*ASL))
 
 if __name__=='__main__':
     main()

@@ -15,7 +15,6 @@ from datetime import datetime
 from matplotlib.backends.backend_pdf import PdfPages
 from tllab_common.wimread import imread as imr
 
-
 if __package__ is None or __package__ == '': #usual case
     import misc
     import fluctuationAnalysis as FA
@@ -149,6 +148,7 @@ def bg_sub_traces(dataOrig, params):
 
                 if 0 in params['ChannelsToAnalyze']:
                     np.savetxt(name + "_bg_sub_red.txt", dA.r)
+
                 else:
                     dA.r = dA.g
                 if 1 in params['ChannelsToAnalyze']:
@@ -229,6 +229,15 @@ def binary_call_traces(dataA, params):
                     if params['Remove1FrameJumps'] == 1:
                         if dataB[cell][color][i] == 0 and dataB[cell][color][i+1] == 1 and dataB[cell][color][i+2] == 0:
                             dataB[cell][color][i+1] = 0
+            ##writing binary traces
+            for cell in range(len(dataB)):
+                dB = dataB[cell]
+                name = dB.name.split(".txt")[0]
+                if color == 'r':
+                    np.savetxt(name + "_bg_sub_red_digital.txt", dB.r)
+                elif color == 'g':
+                    np.savetxt(name + "_bg_sub_green_digital.txt", dB.g)
+
     return dataB
 
 ###################################
@@ -394,22 +403,28 @@ def make_plots_traces(dataOrig, dataA, dataB, params):
         
             maxVal2 = []
             amp = []
-            for i in range(len(dataA)):
+            for dA in dataA:
                 # fit data to gaussion function
-                x = np.hstack((-dataA[i].tau[::-1][-nbPts1:-1], dataA[i].tau[:nbPts2]))   #the number of data
-                y = np.hstack((dataA[i].G[1, 0][::-1][-nbPts1:-1], dataA[i].G[0, 1][:nbPts2]))
-                n = nbPts1 + nbPts2 -1
-                # calculate mean and standard deviaiton
+                x = np.hstack((-dA.tau[::-1][-nbPts1:-1], dA.tau[:nbPts2]))   #the number of data
+                y = np.hstack((dA.G[1, 0][::-1][-nbPts1:-1], dA.G[0, 1][:nbPts2]))
+                n = nbPts1 + nbPts2 - 1
+                # calculate mean and standard deviation
                 mean = sum(x*y)/n
                 sigma = abs((sum(y*(x-mean)**2)/n))**0.5
-                popt, pcov = curve_fit(gauss_function, x, y, sigma = None, p0 = [0.5, mean, sigma, 0] )
-                maxVal2.append(popt[1])
-                amp.append(popt[0])
+                try:
+                    popt, pcov = curve_fit(gauss_function, x, y, [0.5, mean, sigma, 0], maxfev=100000,
+                                         bounds=((0, np.nanmin(x), 0, -np.inf), (np.inf, np.nanmax(x), np.inf, np.inf)))
+                    maxVal2.append(popt[1])
+                    amp.append(popt[0])
+                except Exception:
+                    maxVal2.append(mean)
+                    amp.append(y.max() - y.min())
             NoPeak = np.where(np.r_[amp] < 0)[0]
-            Peak =  np.where(np.r_[amp] >= 0)[0]
+            Peak = np.where(np.r_[amp] >= 0)[0]
             for x in params['retainedTraces']:
                 if x in Peak:
-                   sortedIds2 = [x for _, x in sorted(zip([maxVal2[x] for x in range(len(maxVal2)) if x in Peak],params['retainedTraces']))]
+                   sortedIds2 = [x for _, x in sorted(zip([maxVal2[x] for x in range(len(maxVal2)) if x in Peak],
+                                                          params['retainedTraces']))]
             sortedIds = np.r_[NoPeak, sortedIds2]
             sortedIds = np.asarray(sortedIds)
 
@@ -604,32 +619,73 @@ def calculateCF(dataA, dataB, params):
 
     if params['alignTracesCF']:  # for aligning traces on first green burst, will complain if no first burst in a trace
         t0 = [dB.t[np.where(dB[params['color2align'].lower()[0]])[0][0]] for dB in [dataB[i] for i in params['retainedTraces']]]
-        fname = params['file'] + "_correlation_functions_aligned_startBurst_" + params['color2align'] + ".pdf"
+        fnameAna = params['file'] + "_correlation_functions_aligned_startBurst_" + params['color2align'] + "_analog.pdf"
+        fnameDigi = params['file'] + "_correlation_functions_aligned_startBurst_" + params['color2align'] + "_digital.pdf"
+
+    # TODO: make excludeInduction = True work with the test in test_CF.py
+    if params['excludeInduction']:  # for excluding the induction time in ACF calculation, without burst alignment
+        t0 = None
+        burstStarts = [dB.t[np.where(dB[params['color2align'].lower()[0]])[0][0]]
+                       for dB in [dataB[i] for i in params['retainedTraces']]]
+        fnameAna = params['file'] + "_correlation_functions_excludeInduction_" + params['color2align'] + "_analog.pdf"
+        fnameDigi = params['file'] + "_correlation_functions_excludeInduction_" + params['color2align'] + "_digital.pdf"
+
     else:  # for auto/cross correlation from first until last frameWindow, without alignment
         t0 = None
-        fname = params['file']+"_correlation_functions.pdf"
+        fnameAna = params['file']+"_correlation_functions_analog.pdf"
+        fnameDigi = params['file'] + "_correlation_functions_digital.pdf"
 
-    ss = []
-    for dA in [dataA[i] for i in params['retainedTraces']]:
+    ssAna = []
+    ssDigi = []
+
+    corrCount = 0
+    for i in range(0,len(dataA)):
+        if i not in params['retainedTraces']:
+            corrCount = corrCount + 1
+            continue
+        dA = dataA[i]
+        dB = dataB[i]
+
+        if params['excludeInduction']:
+            frame0 = int(burstStarts[i-corrCount]/dA.dt)
+
         if 'r_orig' in dA or 'g_orig' in dA:
-            v_orig = np.vstack([dA[c + '_orig'] for c in 'rgb' if c + '_orig' in dA])
+            v_origAna = np.vstack([dA[c + '_orig'] for c in 'rgb' if c + '_orig' in dA])
+            v_origDigi = np.vstack([dB[c + '_orig'] for c in 'rgb' if c + '_orig' in dB])
         else:
-            v_orig = None
+            v_origAna = None
+            v_origDigi = None
         if params.get('selectOnDistance', False):
-            ss.append(FA.mcSig(dA.t, np.vstack((dA.r, dA.g)), mask=dA.distmask, v_orig=v_orig))
+            ssAna.append(FA.mcSig(dA.t, np.vstack((dA.r, dA.g)), mask=dA.distmask, v_orig=v_origAna))
+            ssDigi.append(FA.mcSig(dB.t, np.vstack((dB.r, dB.g)), mask=dB.distmask, v_orig=v_origDigi))
+        elif params.get('excludeInduction', False):
+            ssAna.append(FA.mcSig(dA.t, np.vstack((dA.r, dA.g)), frameWindow=[frame0, dA.frameWindow[1]], v_orig=v_origAna))
+            ssDigi.append(FA.mcSig(dB.t, np.vstack((dB.r, dB.g)), frameWindow=[frame0, dB.frameWindow[1]], v_orig=v_origDigi))
         else:
-            ss.append(FA.mcSig(dA.t, np.vstack((dA.r, dA.g)), frameWindow=dA.frameWindow, v_orig=v_orig))
+            ssAna.append(FA.mcSig(dA.t, np.vstack((dA.r, dA.g)), frameWindow=dA.frameWindow, v_orig=v_origAna))
+            ssDigi.append(FA.mcSig(dB.t, np.vstack((dB.r, dB.g)), frameWindow=dB.frameWindow, v_orig=v_origDigi))
 
-    ss = FA.mcSigSet(ss)
-    ss.alignSignals(t0)
+    ssAna = FA.mcSigSet(ssAna)
+    ssDigi = FA.mcSigSet(ssDigi)
+
+    ssAna.alignSignals(t0)
+    ssDigi.alignSignals(t0)
+
     if params.get('ccfFunction') is not None and params['ccfFunction'].lower() in ('linefit', 'sc'):
-        ss.compAvgCF_SC(mT=params.get('mTauOrder'), fitWindow=params.get('fitWindow'))
+        ssAna.compAvgCF_SC(mT=params.get('mTauOrder'), fitWindow=params.get('fitWindow'))
+        ssDigi.compAvgCF_SC(mT=params.get('mTauOrder'), fitWindow=params.get('fitWindow'))
     else:
-        ss.compAvgCF(mT=params.get('mTauOrder'))
-    ss.bootstrap(nBs=params.get('nBs'))
+        ssAna.compAvgCF(mT=params.get('mTauOrder'))
+        ssDigi.compAvgCF(mT=params.get('mTauOrder'))
 
-    with PdfPages(fname) as pdf:
-        plot_figures.showCorrFun(pdf, ss)
+    ssAna.bootstrap(nBs=params.get('nBs'))
+    ssDigi.bootstrap(nBs=params.get('nBs'))
+
+    with PdfPages(fnameAna) as pdf:
+        plot_figures.showCorrFun(pdf, ssAna)
+
+    with PdfPages(fnameDigi) as pdf:
+        plot_figures.showCorrFun(pdf, ssDigi)
 
     """ ---- Explanation of results from ss ---
         ss.G = correlation functions: ss.G[0,0] = green, ss.G[1,1] = red, ss.G[0,1] = red to green, ss.G[1,0] = green to red
@@ -642,24 +698,26 @@ def calculateCF(dataA, dataB, params):
     # display average trace and individual background subtracted traces
     print("Plotting average trace")
     with PdfPages(params['file']+"_average_trace.pdf") as pdf:
-        plot_figures.showAvTrace(pdf, ss, names=[dataA[i].name for i in params['retainedTraces']])
+        plot_figures.showAvTrace(pdf, ssAna, names=[dataA[i].name for i in params['retainedTraces']])
         plt.close()
 
     # write average trace to file
     if 0 in params['ChannelsToAnalyze']:
-        np.savetxt(params['file']+'_average_trace_red.txt', np.vstack((ss.t, ss.v[0], ss.dv[0])).T)
+        np.savetxt(params['file']+'_average_trace_red.txt', np.vstack((ssAna.t, ssAna.v[0], ssAna.dv[0])).T)
     if 1 in params['ChannelsToAnalyze']:
-        np.savetxt(params['file'] + '_average_trace_green.txt', np.vstack((ss.t, ss.v[1], ss.dv[1])).T)
-    return ss
+        np.savetxt(params['file'] + '_average_trace_green.txt', np.vstack((ssAna.t, ssAna.v[1], ssAna.dv[1])).T)
+    return ssAna, ssDigi
 
 #####################################################################
 #### fit and display autocorrelation functions
 ######################################################################
 
-def make_plots_CF(ss, params):
+def make_plots_CF(ssAna, ssDigi, params):
     print("Plotting individual autocorrelations")
-    with PdfPages(params['file']+"_individual_correlation_functions.pdf") as pdfTrace:
-        plot_figures.showCorrelFunAll(pdfTrace, ss.sigsAlign, params['ChannelsToAnalyze'], params)
+    with PdfPages(params['file']+"_individual_correlation_functions_analog.pdf") as pdfTrace:
+        plot_figures.showCorrelFunAll(pdfTrace, ssAna.sigsAlign, params['ChannelsToAnalyze'], params)
+    with PdfPages(params['file']+"_individual_correlation_functions_digital.pdf") as pdfTrace:
+        plot_figures.showCorrelFunAll(pdfTrace, ssDigi.sigsAlign, params['ChannelsToAnalyze'], params)
 
     print("Fitting and plotting correlation functions")
     ### calculate fit for (non-) corrected red autocorrelation. The autocorrelation can be shifted up or down before the fit by changing the y the shiftACFRed parameter.
@@ -675,42 +733,77 @@ def make_plots_CF(ss, params):
             n2 = params[fitFramesColor][1]  # end frame of data for fitting
 
             if correctCF:
-                G = (ss.P.copy(), ss.Pr.copy(), ss.Pg.copy())
-                dG = (ss.dP.copy(), ss.dPr.copy(), ss.dPg.copy())
-            else:
-                G = (ss.G.copy(), ss.Gr.copy(), ss.Gg.copy())
-                dG = (ss.dG.copy(), ss.dGr.copy(), ss.dGg.copy())
-                
-            G = [g[channel, channel] for g in G]
-            dG = [g[channel, channel] for g in dG]
-            G[0] += params[shiftACFColor]
+                GAna = (ssAna.P.copy(), ssAna.Pr.copy(), ssAna.Pg.copy())
+                dGAna = (ssAna.dP.copy(), ssAna.dPr.copy(), ssAna.dPg.copy())
 
-            with PdfPages('{}_autocorrelation_fit_{}_{}corrected.pdf'.format(params['file'], color, (1-correctCF)*'un')) as pdf, \
-                PdfPages('{}_autocorrelation_fit_{}_{}corrected_zoom.pdf'.format(params['file'], color, (1-correctCF)*'un')) as zoompdf:
-                for i, (g, dg, t) in enumerate(zip(G, dG, ('G', 'Normalized r', 'Normalized g'))):
-                    fitp, dfitp = misc.fit_line(ss.tau[n1:n2], g[n1:n2], dg[n1:n2])
-                    plot_figures.showAutoCorr(pdf, col, t, ss.tau, g, dg, fitp, dfitp)
-                    plot_figures.showAutoCorr(zoompdf, col, t, ss.tau, g, dg, fitp, dfitp, params['ACFxmax'])
+                GDigi = (ssDigi.P.copy(), ssDigi.Pr.copy(), ssDigi.Pg.copy())
+                dGDigi = (ssDigi.dP.copy(), ssDigi.dPr.copy(), ssDigi.dPg.copy())
+
+            else:
+                GAna = (ssAna.G.copy(), ssAna.Gr.copy(), ssAna.Gg.copy())
+                dGAna = (ssAna.dG.copy(), ssAna.dGr.copy(), ssAna.dGg.copy())
+
+                GDigi = (ssDigi.G.copy(), ssDigi.Gr.copy(), ssDigi.Gg.copy())
+                dGDigi = (ssDigi.dG.copy(), ssDigi.dGr.copy(), ssDigi.dGg.copy())
+                
+            GAna = [g[channel, channel] for g in GAna]
+            dGAna = [g[channel, channel] for g in dGAna]
+            GAna[0] += params[shiftACFColor]
+
+            GDigi= [g[channel, channel] for g in GDigi]
+            dGDigi = [g[channel, channel] for g in dGDigi]
+            GDigi[0] += params[shiftACFColor]
+
+            with PdfPages('{}_autocorrelation_fit_{}_{}corrected_analog.pdf'.format(params['file'], color, (1-correctCF)*'un')) as pdf, \
+                PdfPages('{}_autocorrelation_fit_{}_{}corrected_zoom_analog.pdf'.format(params['file'], color, (1-correctCF)*'un')) as zoompdf:
+                for i, (g, dg, t) in enumerate(zip(GAna, dGAna, ('G', 'Normalized r', 'Normalized g'))):
+                    fitp, dfitp = misc.fit_line(ssAna.tau[n1:n2], g[n1:n2], dg[n1:n2])
+                    plot_figures.showAutoCorr(pdf, col, t, ssAna.tau, g, dg, fitp, dfitp)
+                    plot_figures.showAutoCorr(zoompdf, col, t, ssAna.tau, g, dg, fitp, dfitp, params['ACFxmax'])
                     if i==0:
-                        np.savetxt('{}_autocorrelation_{}_{}corrected.txt'.format(params['file'], color,
-                            (1-correctCF)*'un'), np.vstack((ss.tau, g, dg)).T, delimiter = "\t", fmt = "%1.5f")
+                        np.savetxt('{}_autocorrelation_{}_{}corrected_analog.txt'.format(params['file'], color,
+                            (1-correctCF)*'un'), np.vstack((ssAna.tau, g, dg)).T, delimiter = "\t", fmt = "%1.5f")
+
+            with PdfPages('{}_autocorrelation_fit_{}_{}corrected_digital.pdf'.format(params['file'], color, (1-correctCF)*'un')) as pdf, \
+                PdfPages('{}_autocorrelation_fit_{}_{}corrected_zoom_digital.pdf'.format(params['file'], color, (1-correctCF)*'un')) as zoompdf:
+                for i, (g, dg, t) in enumerate(zip(GDigi, dGDigi, ('G', 'Normalized r', 'Normalized g'))):
+                    fitp, dfitp = misc.fit_line(ssDigi.tau[n1:n2], g[n1:n2], dg[n1:n2])
+                    plot_figures.showAutoCorr(pdf, col, t, ssDigi.tau, g, dg, fitp, dfitp)
+                    plot_figures.showAutoCorr(zoompdf, col, t, ssDigi.tau, g, dg, fitp, dfitp, params['ACFxmax'])
+                    if i==0:
+                        np.savetxt('{}_autocorrelation_{}_{}corrected_digital.txt'.format(params['file'], color,
+                            (1-correctCF)*'un'), np.vstack((ssDigi.tau, g, dg)).T, delimiter = "\t", fmt = "%1.5f")
+
+    ACFAnaRed = ssAna.P[1, 1][params['rangeACFResidual'][0]:params['rangeACFResidual'][1]]
+    ACFDigiRed = ssDigi.P[1, 1][params['rangeACFResidual'][0]:params['rangeACFResidual'][1]]
+    ACFAnaGreen = ssAna.P[0,0][params['rangeACFResidual'][0]:params['rangeACFResidual'][1]]
+    ACFDigiGreen = ssDigi.P[0, 0][params['rangeACFResidual'][0]:params['rangeACFResidual'][1]]
+
+    sumResRed = 0
+    sumResGreen = 0
+    nbrPoints = len(ACFAnaRed)
+    for i in range(0,nbrPoints):
+        sumResRed = sumResRed + (ACFAnaRed[i]-ACFDigiRed[i])**2
+        sumResGreen = sumResGreen + (ACFAnaGreen[i]-ACFDigiGreen[i])**2
+
+    np.savetxt(params['file']+'_sum_sq_residuals_ACF_corrected.txt', [sumResRed,sumResGreen])
 
     if len(params['ChannelsToAnalyze']) == 2:
         ### calculate fit for (non-)corrected cross-correlation
         for correctCF in (False, True):
             if correctCF:
-                Gt = [ss.P.copy(), ss.Pr.copy(), ss.Pg.copy()]
-                dGt = [ss.dP.copy(), ss.dPr.copy(), ss.dPg.copy()]
+                Gt = [ssAna.P.copy(), ssAna.Pr.copy(), ssAna.Pg.copy()]
+                dGt = [ssAna.dP.copy(), ssAna.dPr.copy(), ssAna.dPg.copy()]
             else:
-                Gt = [ss.G.copy(), ss.Gr.copy(), ss.Gg.copy()]
-                dGt = [ss.dG.copy(), ss.dGr.copy(), ss.dGg.copy()]
+                Gt = [ssAna.G.copy(), ssAna.Gr.copy(), ssAna.Gg.copy()]
+                dGt = [ssAna.dG.copy(), ssAna.dGr.copy(), ssAna.dGg.copy()]
             Gt[0] += params['shiftCC']
             G = [g[0, 1] for g in Gt]
             G2 = [g[1, 0, ::-1] for g in Gt]
             dG = [g[0, 1] for g in dGt]
             dG2 = [g[1, 0, ::-1] for g in dGt]
 
-            tau = ss.tau
+            tau = ssAna.tau
             tau2 = -tau[::-1]
 
             ml, nl = params.get('fitFramesCCLeft', [1, len(tau)])
@@ -739,16 +832,16 @@ def make_plots_CF(ss, params):
                     A = np.trapz(y-y0, x)/sigma/np.sqrt(2*np.pi)
 
                     if params.get('CCxlim') is None:
-                        params['CCxlim'] = [-ss.tau.max()/1.5, ss.tau.max()/1.5]
+                        params['CCxlim'] = [-ssAna.tau.max()/1.5, ssAna.tau.max()/1.5]
                     try:  # fit data to gaussian function
                         popt, pcov = curve_fit(gauss_function, x, y, sigma=yerr, p0=[A, mean, sigma, y0])
                         perr = np.sqrt(np.diag(pcov))
-                        plot_figures.showCrossCorr(pdf, t, ss.tau, g, g2, dg, dg2, None, perr[0], perr[1], *popt, xlim=params['CCxlim'])
+                        plot_figures.showCrossCorr(pdf, t, ssAna.tau, g, g2, dg, dg2, None, perr[0], perr[1], *popt, xlim=params['CCxlim'])
                         with open('{}_crosscorrelation_{}corrected_fit_params.txt'.format(params['file'],
                                                                     (1-correctCF)*'un'), 'a' if i else 'w') as f:
                             np.savetxt(f, np.expand_dims(np.hstack((popt, perr)), 0), delimiter='\t', fmt='%1.5f')
                     except Exception:
-                        plot_figures.showCrossCorr(pdf, t, ss.tau, g, g2, dg, dg2, xlim=params['CCxlim'])
+                        plot_figures.showCrossCorr(pdf, t, ssAna.tau, g, g2, dg, dg2, xlim=params['CCxlim'])
                         print(misc.color('Error fitting cross correlation', 208))
                         with open('{}_crosscorrelation_{}corrected_fit_params.txt'.format(params['file'],
                                                                     (1-correctCF)*'un'), 'a' if i else 'w') as f:
@@ -880,8 +973,8 @@ def make_burst_histograms(dataB, params):
         plt.xlabel('Time between bursts (s)')
         plt.ylabel('Frequency')
         plt.text(0.9, 0.9,
-                 f'burst duration, mean: {TimeBetweenBurstMean * dt:.2f} +/- {TimeBetweenBurstMeanErr * dt:.2f} s\n' +
-                 f'Exp fit burst duration, tau: {poptFreq[1]:.2f} +/- {perrFreq[1]:.2f} s',
+                 f'time between bursts, mean: {TimeBetweenBurstMean * dt:.2f} +/- {TimeBetweenBurstMeanErr * dt:.2f} s\n' +
+                 f'Exp fit time between bursts, tau: {poptFreq[1]:.2f} +/- {perrFreq[1]:.2f} s',
                  horizontalalignment='right', verticalalignment='top', transform=plt.gca().transAxes)
 
         plt.tight_layout()
@@ -1020,9 +1113,7 @@ def pipeline_correlation_functions(params):
             parameter_file = os.path.join(parameter_file, 'parameters.yml')
         if not parameter_file[-4:] == '.yml':
             parameter_file += '.yml'
-        f = os.path.split(__file__)
-        params = misc.getParams(parameter_file,
-                                os.path.join(os.path.dirname(f[0]), f[1].replace('.py', '_parameters_template.yml')),
+        params = misc.getParams(parameter_file, __file__.replace('.py', '_parameters_template.yml'),
                                 ('PyFile', 'outputfolder'))
     else:
         parameter_file = ''
@@ -1036,6 +1127,7 @@ def pipeline_correlation_functions(params):
         smoothOrquantize(dataOrig, params)
         dataA = bg_sub_traces(dataOrig, params)
         dataB = binary_call_traces(dataA, params)
+
         if params.get('filterTraces', True):
             dataA, params = filter_traces(dataA, dataB, params)
         else:
@@ -1047,13 +1139,16 @@ def pipeline_correlation_functions(params):
         make_plots_traces(dataOrig, dataA, dataB, params)
 
     if params['calcCF'] == 1:
-        ss = calculateCF(dataA, dataB, params)
-        params['ss'] = ss
-        for i, s in zip(params['retainedTraces'], ss.sigsAlign):
+        ssAna, ssDigi = calculateCF(dataA, dataB, params)##INEKE
+        params['ssAna'] = ssAna
+        params['ssDigi'] = ssDigi
+        for i, s in zip(params['retainedTraces'], ssAna.sigsAlign):
+            s.name = dataOrig[i].name
+        for i, s in zip(params['retainedTraces'], ssDigi.sigsAlign):
             s.name = dataOrig[i].name
 
     if params['makeCFplot'] == 1:
-        make_plots_CF(ss, params)
+        make_plots_CF(ssAna, ssDigi, params)
     
     if params['makeHistogram'] == 1:
         make_burst_histograms(dataB, params)
@@ -1062,6 +1157,7 @@ def pipeline_correlation_functions(params):
         make_burst_histograms_singlecells(dataOrig, dataA, dataB, params)
 
     return params
+
 
 def main():
     if len(sys.argv) < 2:

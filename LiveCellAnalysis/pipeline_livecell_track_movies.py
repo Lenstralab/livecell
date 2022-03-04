@@ -3,7 +3,6 @@
 import os
 import sys
 import re
-import psutil
 import copy as copy2
 import scipy
 from PIL import Image
@@ -15,13 +14,15 @@ import numpy as np
 import shutil
 import yaml
 import pickle
+# import math
+# import rtree
+from itertools import product
 from skimage import registration
 from skimage import filters
 from matplotlib.backends.backend_pdf import PdfPages
-from parfor import parfor
+from parfor import parfor, chunks
 from tllab_common.wimread import imread as imr
 from tllab_common.tiffwrite import IJTiffWriter, tiffwrite
-from tllab_common import transforms
 from tllab_common.findcells import findcells
 
 if __package__ is None or __package__ == '':  # usual case
@@ -45,59 +46,76 @@ squareStamp = [np.r_[-5, -5, -5, -5, -5, -5, -5, -5, -4, -3, -2, 2, 3, 4, 5, 5, 
                np.r_[-5, -4, -3, -2, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 4, 3, 2, -2, -3, -4, -5, -5, -5, -5, -5, -5, -5]]
 
 
-def calculate_general_parameters(params, parameter_file):
-    if params['folderIn'][-1] != "/": params['folderIn'] += "/"
-    params['lenExpList'] = len(params['expList'])
-    for i in range(params['lenExpList']):
-        if os.path.exists(os.path.join(params['folderIn'], params['expList'][i])):
-            params['fileList'][i] = os.path.join(params['folderIn'], params['expList'][i])
-        else:
-            params['expList'][i] = os.path.join(os.path.dirname(os.path.abspath(parameter_file)),
-                                                params['folderIn'], params['expList'][i])
-    if params['outputfolder'][-1] != "/": params['outputfolder'] += "/"
+def expandExpList(params, parameter_file):
+    """ Completely expand path, including absolute path and extension for every item in params['ExpList']
+    """
+    extensions = '.ims', '.dv', '.czi'  # add extensions here
+    pattern = re.compile('$|'.join(('^Pos\d+', ) + extensions) + '$')
+    pat = re.compile('^Pos\d+$')
+    pExpList, pCorrectDrift, pTSregfile = [params.get(p, []) for p in ('expList', 'CorrectDrift', 'TSregfile')]
+    if l := len(pExpList):
+        try:
+            if not len(pCorrectDrift):
+                pCorrectDrift = l * [False]
+        except Exception:
+            pCorrectDrift = l * [False if pCorrectDrift is None else pCorrectDrift]
+        if not len(pTSregfile):
+            pTSregfile = l * [[]]
+
+    expList, CorrectDrift, TSregfile = [], [], []
+    for exp, drift, tsreg in zip(pExpList, pCorrectDrift, pTSregfile):
+        folderIn = params['folderIn']
+        if not os.path.isabs(folderIn):
+            folderIn = os.path.join(os.path.dirname(os.path.abspath(parameter_file)), folderIn)
+        pathExp = os.path.join(folderIn, exp)
+        if os.path.isdir(pathExp) and not re.search(pat, os.path.basename(exp)):  # just a folder with images, add all
+            for item in [re.search(pattern, i) for i in sorted(os.listdir(pathExp))]:
+                if item:
+                    expList.append(os.path.join(pathExp, item.string))
+                    CorrectDrift.append(drift)
+                    TSregfile.append(tsreg)
+        elif not os.path.exists(pathExp):  # filename without extension, add all we can find, normally just 1 of course
+            for ext in extensions:
+                if os.path.exists(pathExp + ext):
+                    expList.append(pathExp + ext)
+                    CorrectDrift.append(drift)
+                    TSregfile.append(tsreg)
+        else:  # completely defined already, just continue
+            expList.append(pathExp)
+            CorrectDrift.append(drift)
+            TSregfile.append(tsreg)
+
+    if not expList:
+        raise FileNotFoundError(f'Could not find/open files in params["folderIn"].')
+
+    params['expList'] = expList
+    params['lenExpList'] = len(expList)
+    params['CorrectDrift'] = CorrectDrift
+    params['TSregfile'] = TSregfile
     return params
 
+
 def getPaths(params, parameter_file=None):
-    ''' Update the dict params with necessary keys, and make sure paths exist etc.
-    '''
-    if os.path.exists(params['pathIn']+'.ims'):
-        params['microscope'] = 'spinningDisk'
-        params['pathIn'] += '.ims'
-        p = params['pathIn'][:-4]
+    """ Update the dict params with necessary keys, and make sure paths exist etc.
+    """
+    path, ext = os.path.splitext(params['pathIn'])
+    path = path.rstrip(os.path.sep)
+    params['microscope'] = {'.ims': 'spinningDisk',
+                            '.dv': 'deltaVision',
+                            '.czi': 'Elyra',
+                            '.tif': 'unknown'}.get(ext.lower(), 'AxioObserver')
 
-    elif os.path.exists(params['pathIn']+'.dv'):
-        params['microscope'] = 'deltaVision'
-        params['pathIn'] += '.dv'
-        p = params['pathIn'][:-3]
-
-    elif params['pathIn'][:-4] == '.czi':
-        params['microscope'] = 'Elyra'
-        p = params['pathIn'][:-4]
-
-    elif os.path.isdir(params['pathIn']) and 'Pos0' in os.listdir(params['pathIn']):
-        params['microscope'] = 'AxioObserver'
-        params['pathIn'] = os.path.join(params['pathIn'], 'Pos0')
-        p = params['pathIn'][:-5]
-
-    elif params['pathIn'][:-4] == 'Pos0':
-        params['microscope'] = 'AxioObserver'
-        p = params['pathIn'][:-5]
-
-    elif os.path.exists(params['pathIn']+'.tif'):
-        params['microscope'] = 'unknown'
-        params['pathIn'] += '.tif'
-        p = params['pathIn'][:-4]
-
+    if re.search('Pos\d+$', path):
+        expName = f'{os.path.basename(os.path.dirname(path))}_{os.path.basename(path)}'
     else:
-        params['microscope'] = 'unknown'
-        p = os.path.splitext(params['pathIn'])[0] #just give up
+        expName = os.path.basename(path)
 
-    params['expName'] = re.sub('((?<=.)_(?:\d[_-]?){7}\d|(?:\d[_-]?){7}\d_(?=.))', '', os.path.split(p)[-1])
+    params['expName'] = re.sub('((?<=.)_(?:\d[_-]?){7}\d|(?:\d[_-]?){7}\d_(?=.))', '', expName)
     date = re.findall('(?:\d[_-]?){7}\d', params['pathIn'])
     if date:
         params['date'] = date[0]
     else:
-        params['date'] = p.split(os.path.sep)[-2]
+        params['date'] = path.split(os.path.sep)[-2]
     params['pathOut'] = os.path.join(os.path.abspath(params['outputfolder']), params['date'] + "_" + params['expName'])
     params['expPathOut'] = os.path.join(params['pathOut'], params['date'] + "_" + params['expName'])
 
@@ -109,12 +127,15 @@ def getPaths(params, parameter_file=None):
         dateTime = dateTimeObj.strftime("%d-%b-%Y_%Hh%Mm%Ss")
         if os.path.exists(parameter_file):
             shutil.copyfile(os.path.abspath(parameter_file),
-                            os.path.join(params['expPathOut'] + "_pipeline_livecell_track_movies_parameters_runtime_" + dateTime + ".yml"))
+                            os.path.join(params['expPathOut'] + "_pipeline_livecell_track_movies_parameters_runtime_"
+                                         + dateTime + ".yml"))
         else:
-            parameter_file = os.path.join(params['expPathOut'] + "_pipeline_livecell_track_movies_parameters_runtime_" + dateTime + ".yml")
+            parameter_file = os.path.join(params['expPathOut'] + "_pipeline_livecell_track_movies_parameters_runtime_"
+                                          + dateTime + ".yml")
             with open(parameter_file, 'w') as f:
                 yaml.safe_dump(params, f)
-        shutil.copyfile(os.path.abspath(__file__), os.path.join(params['expPathOut'] + "_pipeline_livecell_track_movies.py"))
+        shutil.copyfile(os.path.abspath(__file__), os.path.join(params['expPathOut']
+                                                                + "_pipeline_livecell_track_movies.py"))
 
     if params['swapColors']:  # define where in image file to find different colors, idx 0: red, 1: green
         params['channels'] = params['ChannelsToAnalyze'][::-1]
@@ -271,9 +292,7 @@ def optimizeTreshold(params):
                     except:
                         celllist.append(celllisttmp)
 
-            cellswithspots = []
-            for x in range(len(celllist)):
-                cellswithspots.append(len(set(celllist[x])))
+            cellswithspots = [len(set(c)) for c in celllist]
 
             fig = plt.figure()
             g1 = plt.plot(threshvals[1:],spotslist[1:], '-b')
@@ -298,9 +317,124 @@ def optimizeTreshold(params):
             plt.close(fig)
 
 
+def guessHighThreshold(params, imtmp, channel, nbIm, TSregfile, listCellnr, TSreg, cellArray):
+    psfPx = params['psfPx']
+    channels = params['channels']
+    thresholdSD = params['thresholdSD_' + ('Red', 'Green')[channel]]
+    diffThresholdSD = params['diffThresholdSD']
+    TSregRadius = params['TSregRadius']
+
+    def guessThreshold(params, imBpass, t, threshold):
+        size = imBpass.shape
+        if TSregfile:
+            cA = np.zeros(size)
+            for TS in range(len(listCellnr)):
+                center = transformCoords([TSreg[TS][t][1], TSreg[TS][t][0]], channel, params, False)
+                imTStmp2 = create_circular_mask(*size, center=center, radius=TSregRadius) * (listCellnr[TS])
+                cA = np.fmax(cA, imTStmp2).astype(int)
+        elif cellArray is None:
+            cA = np.ones(size)
+        elif cellArray.shape[2] > 1:
+            cA = cellArray[:, :, channel]
+        else:
+            cA = cellArray[:, :, 0]
+
+        # TODO: two spots in two bordering cells might merge
+        # TODO: wimread metadata: optovar etc
+        imBinary = (imBpass > threshold * np.var(imBpass) ** .5).astype(float)  # Masked binary image
+
+        # # Find all the connex objects and determine their centers as initial guesses for the spot locations
+        # R = skimage.measure.regionprops(scipy.ndimage.label(imBinary)[0])
+        # cooGuess = np.vstack([(t, cA[tuple([round(i) for i in r.centroid])], *r.centroid[::-1]) for r in R])
+        # return cooGuess[cooGuess[:, 1] > 0]
+
+        # Find all the connex objects and determine their centers as initial guesses for the spot locations
+        # TODO: regionprops.centroid probably gives a better estimate
+        objects = scipy.ndimage.find_objects(scipy.ndimage.label(imBinary)[0])
+        R = np.array([[np.mean(np.r_[obj[1]]), np.mean(np.r_[obj[0]])] for obj in objects])
+        # TODO: should probably round: round(i)
+        cooGuess = np.vstack([(t, cA[tuple([int(i) for i in r[::-1]])], *r) for r in R])
+        return cooGuess[cooGuess[:, 1] > 0]
+
+    @parfor(range(nbIm), desc='Localizing spots')
+    def fun(t):
+        im = copy2.deepcopy(imtmp(channels[channel], 0, t))
+
+        # prevent interference of dead pixels
+        im = sdf.hotpxfilter(im.astype("float32"))
+        im = im.astype("uint16")
+
+        # bandpass image to find spots
+        imBpass = sdf.bpass(im, psfPx - 0.2, psfPx + 0.2)  # Band-passed image
+        return guessThreshold(params, imBpass, t, thresholdSD),\
+               guessThreshold(params, imBpass, t, (thresholdSD - diffThresholdSD))
+
+    cooGuess1, cooGuess2 = [np.vstack(cooGuess) for cooGuess in zip(*fun)]
+    cooGuess2 = [transformCoords(cooGuess2[cooGuess2[:, 0] == t, 2:], channel, params, True) for t in range(nbIm)]
+
+    return cooGuess1, cooGuess2
+
+
+def localizeHighThresholdPar(params, imtmp, channel, cooGuess_matrix, nbIm, maxCellid):
+    psfPx = params['psfPx']
+    winSize = params['winSize']
+    maxDist = params['maxDist']
+    channels = params['channels']
+    # minSeparation = params['minSeparation']
+    #
+    # def rm_duplicates_idxs(points, r):
+    #     if len(points) == 0:
+    #         return np.array([])
+    #
+    #     def dist(a, b):
+    #         return math.hypot(*[n - m for n, m in zip(a, b)])
+    #     keep = []
+    #     prop = rtree.index.Property()
+    #     prop.dimension = points.shape[1]
+    #     index = rtree.index.Index(properties=prop)
+    #     for i, p in enumerate(points):
+    #         nearby = index.intersection([q - r for q in p] + [q + r for q in p])
+    #         if all(dist(p, points[j]) >= r for j in nearby):
+    #             keep.append(i)
+    #             index.insert(i, (*p, *p))
+    #     return np.array(keep)
+
+    @parfor(chunks(cooGuess_matrix, r=5), ({'RegisterChannels': params['RegisterChannels'],
+                                           'transform': params.get('transform')},), desc='Fitting high intensity spots')
+    def fun(cgchunk, params0):
+        data = []
+        for t, c, *x in cgchunk:
+            im = imtmp(channels[channel], 0, t).astype('float')
+            im = sdf.hotpxfilter(im.astype("float32"))
+            im = im.astype("uint16")
+            intensity, coo, tilt = sdf.GaussianMaskFit2(im, x, psfPx, winSize=winSize, nbIter=100)
+            if intensity != 0 and sum((coo - x) ** 2) < (maxDist * psfPx) ** 2:
+                coo = transformCoords(coo, channel, params0, True)
+                data.append((intensity, *coo, *tilt, t, c - 1))
+        return data
+
+    fitResultsall = np.vstack(sum(fun, []))
+    # idx = rm_duplicates_idxs(fitResultsall[:, 1:3], minSeparation * psfPx)  # Disabled, because see note below
+    # fitResultsall = fitResultsall[idx]
+
+    data = {}
+    for *item, t, c in fitResultsall:
+        if not (t, c) in data:
+            data[t, c] = []
+        data[t, c].append(item)
+
+    dataCellLoc = np.zeros((nbIm, maxCellid, 6))
+    dataDigital = np.zeros((nbIm, maxCellid))
+
+    for key in product(range(nbIm), range(maxCellid)):
+        if key in data:
+            dataCellLoc[key] = max(data[key], key=lambda x: x[0])  # keep the brightest spot in each cell
+            dataDigital[key] = 1
+    return fitResultsall[:, :-1], dataCellLoc[:, :, 0], dataCellLoc, dataDigital
+
+
 def localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregfile, listCellnr, TSreg, cellArray,
                           fitResultsall, dataCell, dataDigital, dataCellLoc):
-
     psfPx = params['psfPx']
     thresholdSD = params['thresholdSD_'+('Red', 'Green')[channel]]
     diffThresholdSD = params['diffThresholdSD']
@@ -332,7 +466,6 @@ def localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregf
     cooGuess2 = transformCoords(cooGuess2, channel, params, True)
 
     cooGuess2_matrix.append(cooGuess2)
-
     cooGuess = cooGuess1
 
     if TSregfile != []:
@@ -353,7 +486,7 @@ def localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregf
             # Keep only if it converged close to the initial guess
             if intensity != 0 and sum((coo - cooGuess[i]) ** 2) < (maxDist * psfPx) ** 2:
                 coo = transformCoords(coo, channel, params, True)
-                # Remove duplicates
+                # Remove duplicates;  NOTE: does not work here because fitResults always is []
                 if sum([sum((coo - a[1:3]) ** 2) < (minSeparation * psfPx) ** 2 for a in fitResults]) == 0:
    #                 fitResults.append(np.r_[intensity, coo, tilt])  # add results to fitResults (spots for this image only)
                     fitResultsall.append(np.r_[intensity, coo, tilt, j])  # add results to fitResultsall (spots for all images in timeseries)
@@ -364,22 +497,23 @@ def localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregf
                     dataCellLoc[j, cellnr - 1, :] = np.r_[intensity, coo, tilt]
 
 
-def transformCoords(coo, channel, params, forward=True):  # TODO: change this to use new transforms class
-    """ This function transforms coordinates if needed: if RegisterChannels is True and we're dealing with the
-        'master channel'.
-        It is always the master channel which is transformed to match the slave channel (named master channel because
-        the master channel has the cylindrical lens on the Elyra, and consequently has to be transformed)
+def transformCoords(coo, channel, params, forward=True):
+    """ This function transforms coordinates if needed: if RegisterChannels is True
         We fit only raw data, but save only transformed coordinates. So we need to transform the coordinates forwards
         (raw to transformed) or backwards (transformed to raw) a few times.
     """
-    if params['RegisterChannels'] and params['channels'][channel] == params['masterChannel']:
-        return transforms.transform_coords((np.array(coo),), params['transform'], forward)[0]
+    if params['RegisterChannels']:
+        if forward:
+            return params['transform'](channel, 0).coords(np.array(coo))
+        else:
+            return params['transform'].inverse(channel, 0).coords(np.array(coo))
     else:
         return np.array(coo)
 
 
 def localizeLowThreshold(params, im, t, channel, size, cooGuess2_matrix, TSregfile, listCellnr, TSreg, cellArray,
                          dataCell, dataDigital, dataCell2, dataCellLoc2, fitResultsall2):
+    # TODO: paralellize this and take cellnumber from cooGuess2_matrix (amend guessHighThreshold)
     psfPx = params['psfPx']
     TSregRadius = params['TSregRadius']
     winSize = params['winSize']
@@ -447,6 +581,7 @@ def localizeLowThreshold(params, im, t, channel, size, cooGuess2_matrix, TSregfi
                             dataDigital[t, cellnr] = 0.5
                             dataCellLoc2[t, cellnr, :] = np.r_[intensity, coo, tilt]
                             fitResultsall2.append(np.r_[intensity, coo, tilt, t])  # add results to fitResultsall2 (spots for all images in timeseries)
+
 
 def fillGap(params, im, t, channel, TSregfile, size, listCellnr, TSreg, dataCell2, dataDigital, dataCellLoc2,
             dataCell3, dataCellLoc3, fitResultsall3):
@@ -530,6 +665,7 @@ def fillGap(params, im, t, channel, TSregfile, size, listCellnr, TSreg, dataCell
                 dataCell3[t, cell] = intensity
                 dataCellLoc3[t, cell, :] = np.r_[intensity, coo, tilt]
                 fitResultsall3.append(np.r_[intensity, coo, tilt, t])  # add results to fitResultsall2 (spots for all images in timeseries)
+
 
 def TSmask(params):
     TSregfile = params['TSregfile']
@@ -655,17 +791,23 @@ def localizeMaster(params):
                 dataCellLoc = np.zeros((nbIm, maxCellid, 6))  # 3D array with rows as timepoints and columns as cellnr and z as information on spot: integrated intensity, x position, y position, offset of tilted plane, x tilt, y tilt
                 dataDigital = np.zeros((nbIm, maxCellid))  # 2D array with rows as timepoints and columns as cellnr. If 1, spot was found with high intensity threshold. If 0.5, spot was found with low intensity threshold. If 0, spot was filled in.
 
-                # run through each image to determine most intense spots (high threshold) and weaker spots (low threshold)
-                for j in trange(nbIm, desc='Fitting high intensity spots'):
-                    im = copy2.deepcopy(imtmp[:, :, channels[channel], :, j].reshape(size))
-                    if cellArray is None:
-                        cA = None
-                    elif cellArray.shape[2]>1:
-                        cA = cellArray[:,:,channels[channel]]
-                    else:
-                        cA = cellArray[:,:,0]
-                    localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregfile, listCellnr, TSreg,
-                                          cA, fitResultsall, dataCell, dataDigital, dataCellLoc)
+                if params.get('ParallelLocalisation', False):
+                    cooGuess1_matrix, cooGuess2_matrix = guessHighThreshold(params, imtmp, channel, nbIm, TSregfile,
+                                                                            listCellnr, TSreg, cellArray)
+                    fitResultsall, dataCell, dataCellLoc, dataDigital = localizeHighThresholdPar(params, imtmp, channel,
+                                                                                      cooGuess1_matrix, nbIm, maxCellid)
+                else:
+                    # run through each image to determine most intense spots (high threshold) and weaker spots (low threshold)
+                    for j in trange(nbIm, desc='Fitting high intensity spots'):
+                        im = copy2.deepcopy(imtmp[:, :, channels[channel], :, j].reshape(size))
+                        if cellArray is None:
+                            cA = None
+                        elif cellArray.shape[2]>1:
+                            cA = cellArray[:,:,channels[channel]]
+                        else:
+                            cA = cellArray[:,:,0]
+                        localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregfile, listCellnr, TSreg,
+                                              cA, fitResultsall, dataCell, dataDigital, dataCellLoc)
 
                 # Save the results of spots found with high threshold in a text file, save images to tif file: columns are: integrated intensity, x position, y position, offset of tilted plane, x tilt, y tilt, framenumber
                 fnTxt = params['expPathOut'] + "_loc_results_" + color + "_threshold_SD" + str(thresholdSD) + ".txt"
@@ -1007,7 +1149,7 @@ def writeFiles(params):
 
     print("Write files")
     # write metadata_head file (first 500 lines metadata)
-    if microscope == "AxioObserver":
+    if microscope == "AxioObserver":  # TODO: cross compatibility
         if not os.path.exists(params['expPathOut'] + "_metadata_head.txt"):
             os.system('head -n 500 ' + os.path.join(re.escape(pathIn), 'metadata.txt') + ' > ' + re.escape(
                 params['expPathOut'] + "_metadata_head.txt"))
@@ -1158,14 +1300,12 @@ def pipeline(params):
             parameter_file = parameter_file[:-3]+'.yml'
         if not parameter_file[-4:] == '.yml':
             parameter_file += '.yml'
-        f = os.path.split(__file__)
-        params = misc.getParams(parameter_file,
-                                os.path.join(os.path.dirname(f[0]), f[1].replace('.py', '_parameters_template.yml')),
+        params = misc.getParams(parameter_file, __file__.replace('.py', '_parameters_template.yml'),
                                 ('folderIn', 'expList', 'outputfolder'))
     else:
         parameter_file = ''
 
-    calculate_general_parameters(params, parameter_file) # get general parameters
+    params = expandExpList(params, parameter_file) # get general parameters
     if params['TSregfile'] != [[]] and params['TSregfile'] != []:
         TSregfileList = params['TSregfile'] # store TSregfile
     else:
@@ -1250,15 +1390,10 @@ def main():
             except Exception:
                 print(misc.color('Exception while working on: {}'.format(parameter_file), 'r:b'))
 
-    # this only runs when this script is run from command-line with ./pipeline..., not when run from ipython
-    # if we do not kill the java vm, (i)python will not exit after completion
-    # be sure to call imr.kill_vm() at the end of your script/session, note that you cannot use imread afterwards
-    if os.path.basename(__file__) in [os.path.basename(i) for i in psutil.Process(os.getpid()).cmdline()]:
-        imr.kill_vm() #stop java used for imread, needed to let python exit
-        print('Stopped the java vm used for imread.')
-
     print('------------------------------------------------')
     print(misc.color('Pipeline finished.', 'g:b'))
 
+
 if __name__ == '__main__':
     main()
+    imr.kill_vm()

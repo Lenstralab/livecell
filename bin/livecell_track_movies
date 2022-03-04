@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 
+import sys
+from traceback import print_exception
+from IPython import embed
 from LiveCellAnalysis.pipeline_livecell_track_movies import main
+from tllab_common.wimread import jvm
+
 
 if __name__ == '__main__':
+    def excepthook(etype, value, traceback):
+        print_exception(etype, value, traceback)
+        embed(colors='neutral')
+    sys.excepthook = excepthook
     main()
+    jvm().kill_vm()
