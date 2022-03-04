@@ -1,5 +1,5 @@
 # Live Cell Analysis
-as used by Gowthaman et al. and Brouwer et al.
+as used by Gowthaman et al, Brouwer et al and Patel et al.
 
 ## Cloning the repository
 Install git: https://git-scm.com/
