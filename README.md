@@ -7,11 +7,14 @@ Install git: https://git-scm.com/
     git clone https://github.com/Lenstralab/livecell.git
     cd livecell
 
-# Code used for Gowthaman et al.
-    git checkout 1edd8b572ebc9944618fe48c23060bb3b6d3b1a3
+# Version of the code used for Patel et al.
+    git checkout 13bff5dc90acec9cf1f22cf7711412ee899113c7
 
-# Code used for Brouwer et al.
+# Version of the code used for Brouwer et al.
     git checkout d521de19239cd95a4decc091751b47b94542a31c
+
+# Version of the code used for Gowthaman et al.
+    git checkout 1edd8b572ebc9944618fe48c23060bb3b6d3b1a3
 
 ## Installation
 If not done already:
