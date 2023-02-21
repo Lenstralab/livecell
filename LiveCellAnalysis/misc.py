@@ -131,13 +131,14 @@ def fminerr(fun, a, y, dy=None, diffstep=1e-6):
 
     hesse = np.matmul(deriv.T, deriv)
 
-    if np.linalg.matrix_rank(hesse) == np.shape(hesse)[0]:
-        da = np.sqrt(chisq * np.diag(np.linalg.inv(hesse)))
-    else:
-        try:
+    try:
+        if np.linalg.matrix_rank(hesse) == np.shape(hesse)[0]:
+            da = np.sqrt(chisq * np.diag(np.linalg.inv(hesse)))
+        else:
             da = np.sqrt(chisq * np.diag(np.linalg.pinv(hesse)))
-        except:
-            da = np.zeros(a.shape)
+    except Exception:
+        da = np.full_like(a, np.nan)
+        # da = np.zeros(a.shape)
         # da = np.full(np.shape(a),np.nan)
         # print('Hessian not invertible, size: {}, rank: {}'.format(np.shape(hesse)[0],np.linalg.matrix_rank(hesse)))
     return chisq, da, R2

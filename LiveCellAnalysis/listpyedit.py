@@ -1,7 +1,4 @@
-#!/usr/bin/python3.8
-
-#in case of using parts in Python 2, listFile supports python2, but other parts might not
-from __future__ import print_function, division
+#!/usr/bin/python3
 
 import os
 import re
@@ -12,7 +9,6 @@ import yaml
 from copy import deepcopy
 from glob import glob
 from inspect import stack
-from numbers import Number
 from tllab_common.wimread import imread
 from tllab_common.misc import objFromDict
 
@@ -21,15 +17,17 @@ if hasattr(yaml, 'full_load'):
 else:
     yamlload = yaml.load
 
+
 class listFile(list):
     def __init__(self, file=None, items=None):
+        super().__init__()
         self.file = None
         self.info = {}
-        if not file is None:
+        if file is not None:
             if isinstance(file, str) and os.path.exists(file) and not os.path.isdir(file):
                 self.load(file)
                 self.file = file
-            elif isinstance(file, (list, tuple)) and len(file)==1:
+            elif isinstance(file, (list, tuple)) and len(file) == 1:
                 if isinstance(file[0], str) and os.path.exists(file[0]) and not os.path.isdir(file[0]):
                     self.load(file[0])
                     self.file = file[0]
@@ -37,7 +35,7 @@ class listFile(list):
                     self += file[0]
             else:
                 self += file
-        if not items is None:
+        if items is not None:
             self.extend(items)
 
     def sort(self):
@@ -62,26 +60,26 @@ class listFile(list):
         del self[:]
         with open(file, 'r') as f:
             content = f.read()
-        listFiles = re.findall('(?<!\[)\[.*\](?!\])', content, re.DOTALL) # everything between listFiles=[ ... ]
-        if len(listFiles):
-            listFiles = listFiles[0][1:-1]
-            items = re.findall('#?[^{}]*{[^{}]*}', listFiles, re.DOTALL) # N x (comment + entry)
+        list_files = re.findall(r'\[(.*)]', content, re.DOTALL)  # everything between listFiles=[ ... ]
+        if len(list_files):
+            list_files = list_files[0][1:-1]
+            items = re.findall(r'#?[^{}]*{[^{}]*}', list_files, re.DOTALL)  # N x (comment + entry)
             for item in items:
-                entry = re.findall('#?\s*{[^{}]*}', item, re.DOTALL)[0]
-                comment = re.findall('^[^{}]*', item, re.DOTALL)[0]
-                comment = re.sub('^,?[\r\n\s#]*', '', comment)
-                comment = re.sub('[\r\n\s#]*$', '', comment)
+                entry = re.findall(r'#?\s*{[^{}]*}', item, re.DOTALL)[0]
+                comment = re.findall(r'^[^{}]*', item, re.DOTALL)[0]
+                comment = re.sub(r'^,?[\r\n\s#]*', '', comment)
+                comment = re.sub(r'[\r\n\s#]*$', '', comment)
                 use = not entry.startswith('#')
-                entry = re.sub('^(\s*#)+', '', entry, flags=re.MULTILINE)
-                entry = re.sub('\t', ' ', entry, flags=re.MULTILINE)
+                entry = re.sub(r'^(\s*#)+', '', entry, flags=re.MULTILINE)
+                entry = re.sub(r'\t', ' ', entry, flags=re.MULTILINE)
                 d = objFromDict(use=use, comment=comment)
                 d.update(yamlload(entry))
                 self.append(d)
 
-    def getInfo(self, n):
+    def get_info(self, n):
         if not isinstance(n, str):
             n = self[n]['rawPath']
-        if not n in self.info:
+        if n not in self.info:
             with imread(n) as im:
                 self.info[n] = im.__repr__()
         return self.info[n]
@@ -98,7 +96,7 @@ class listFile(list):
                 s += '# '
             s += '{'
             for i, (k, v) in enumerate(item.items()):
-                if not k in ('use', 'comment'):
+                if k not in ('use', 'comment'):
                     s += "'{}': {},\n    ".format(k, v.__repr__())
                     if not item.get('use', True):
                         s += '# '
@@ -121,7 +119,7 @@ class listFile(list):
         return deepcopy(self)
 
     def __eq__(self, other):
-        if len(self)==0 and len(other)==0:
+        if len(self) == 0 and len(other) == 0:
             return True
         elif len(self) != len(other):
             return False
@@ -159,22 +157,22 @@ class listFile(list):
 
     def __iadd__(self, file):
         """ Merges this instance with another onother one. """
-        if isinstance(file, listFile): #add from another instance
+        if isinstance(file, listFile):  # add from another instance
             self.extend(file)
         elif isinstance(file, dict):
             self.append(file)
         elif isinstance(file, (list, tuple)):
             for f in file:
                 self += f
-        elif file.endswith('.list.py'): #add from a list.py file
+        elif file.endswith('.list.py'):  # add from a list.py file
             files = glob(file)
             for file in files:
                 self += listFile(file)
-        elif os.path.isdir(file): #add all .list.py's we can find in a folder and its subfolders
+        elif os.path.isdir(file):  # add all .list.py's we can find in a folder and its subfolders
             files = glob(os.path.join(file, '**', '*.list.py'))
             for file in files:
                 self += listFile(file)
-        else: #add from a rawPath, trk_r or trk_g
+        else:  # add from a rawPath, trk_r or trk_g
             trk_g, trk_r = 2 * [None]
             if not file.endswith('.txt'):
                 rawPath = file
@@ -183,8 +181,8 @@ class listFile(list):
                     trk_g = file
                 elif file.endswith('_trk_results_red.txt'):
                     trk_r = file
-                rawPath = ffind(re.escape(os.path.split(re.findall('.*(?=_cellnr)', file)[0])[1]),
-                         os.path.split(file)[0].replace('analysis', 'data'), 'once')
+                rawPath = ffind(re.escape(os.path.split(re.findall(r'.*(?=_cellnr)', file)[0])[1]),
+                                os.path.split(file)[0].replace('analysis', 'data'), once=True)
 
             d = {'use': True}
             with imread(rawPath) as im:
@@ -192,7 +190,7 @@ class listFile(list):
                     d['metadata'] = rawPath
                 else:
                     d['metadata'] = rawPath
-                if im.shape[3]==1:
+                if im.shape[3] == 1:
                     d['maxProj'] = rawPath
                 elif os.path.exists(os.path.splitext(rawPath)[0]+'_max.tif'):
                     d['maxProj'] = os.path.splitext(rawPath)[0]+'_max.tif'
@@ -200,36 +198,38 @@ class listFile(list):
                     d['maxProj'] = ''
 
                 d['rawPath'] = rawPath
-                d['trk_g'] = trk_g or ffind(re.escape(os.path.splitext(os.path.split(rawPath)[1])[0]) + '_cellnr_\d+_trk_results_green\.txt$',
-                         os.path.split(rawPath)[0].replace('data', 'analysis'), 'once')
-                d['trk_r'] = trk_r or ffind(re.escape(os.path.splitext(os.path.split(rawPath)[1])[0]) + '_cellnr_\d+_trk_results_red\.txt$',
-                         os.path.split(rawPath)[0].replace('data', 'analysis'), 'once')
+                d['trk_g'] = trk_g or ffind(re.escape(os.path.splitext(os.path.split(rawPath)[1])[0]) +
+                                            r'_cellnr_\d+_trk_results_green\.txt$',
+                                            os.path.split(rawPath)[0].replace('data', 'analysis'), once=True)
+                d['trk_r'] = trk_r or ffind(re.escape(os.path.splitext(os.path.split(rawPath)[1])[0]) +
+                                            r'_cellnr_\d+_trk_results_red\.txt$',
+                                            os.path.split(rawPath)[0].replace('data', 'analysis'), once=True)
                 d['frameWindow'] = [0, im.shape[4]-1]
             self.append(d)
         return self
 
 
-def clip(v, min, max, wrap=False):
+def clip(v, min_value, max_value, wrap=False):
     if wrap:
-        if min-max==1:
-            return min
+        if min_value-max_value == 1:
+            return min_value
         else:
-            return (v - min) % (1 + max - min) + min
-    elif min<=v<=max:
+            return (v - min_value) % (1 + max_value - min_value) + min_value
+    elif min_value <= v <= max_value:
         return v
-    elif v<min:
-        return min
+    elif v < min_value:
+        return min_value
     else:
-        return max
+        return max_value
 
 
-class valueBox(tk.Frame):
+class ValueBox(tk.Frame):
     """ Text box with an integer and <> buttons. """
-    def __init__(self, callback=None, value=0, min=0, max=0, wrap=False, **kwargs):
+    def __init__(self, callback=None, value=0, min_value=0, max_value=0, wrap=False, **kwargs):
         super().__init__(**kwargs)
-        self._value = clip(value, min, max)
-        self._min = min
-        self._max = max
+        self._value = clip(value, min_value, max_value)
+        self._min = min_value
+        self._max = max_value
         self.callback = callback
 
         self.bPrev = tk.Button(text='<', command=lambda: self.btn(-1, wrap), master=self)
@@ -248,7 +248,7 @@ class valueBox(tk.Frame):
     @min.setter
     def min(self, value):
         self._min = value
-        if self.value<value:
+        if self.value < value:
             self.value = value
 
     @property
@@ -258,8 +258,8 @@ class valueBox(tk.Frame):
     @max.setter
     def max(self, value):
         self._max = value
-        if self.value>value:
-            self.value=value
+        if self.value > value:
+            self.value = value
 
     @property
     def value(self):
@@ -268,11 +268,11 @@ class valueBox(tk.Frame):
     @value.setter
     def value(self, value):
         cv = clip(value, self.min, self.max)
-        if not self._value==cv:
+        if not self._value == cv:
             self._value = cv
-            if not self.callback is None:
+            if self.callback is not None:
                 self.callback(self.value)
-        if not self.N.get()==str(self._value):
+        if not self.N.get() == str(self._value):
             self.N.delete(0, tk.END)
             self.N.insert(0, str(self._value))
 
@@ -281,7 +281,7 @@ class valueBox(tk.Frame):
         if len(n):
             try:
                 n = int(n)
-            except:
+            except Exception:
                 return
             self.value = n
 
@@ -317,7 +317,7 @@ class CEntry(tk.Entry):
             self.steps += 1
 
 
-class Message():
+class Message:
     def __init__(self, title, text, questions, main=False):
         self.answer = ''
         if main:
@@ -329,18 +329,18 @@ class Message():
         f = tk.Frame(self.window, height=25)
         f.pack()
         for q in questions:
-            tk.Button(f, text=q, command=self.bPress(q)).pack(side=tk.LEFT)
+            tk.Button(f, text=q, command=self.button_press(q)).pack(side=tk.LEFT)
         if main:
             self.window.mainloop()
 
-    def bPress(self, n):
+    def button_press(self, n):
         def fun(*args):
             self.answer = n
             self.window.destroy()
         return fun
 
 
-class app():
+class App:
     """ GUI to view and edit .list.py files.
 
     Functionality:
@@ -369,14 +369,15 @@ class app():
         ./listpyedit abc.list.py:                         opens abc.list.py
         ./listpyedit abc.list.py def.list.py:             opens and merges abc.list.py and def.list.py
         ./listpyedit /DATA/lenstra_lab/user/*.list.py:    opens and merges all list.py files in /DATA/lenstra_lab/user/
-        ./listpyedit /DATA/lenstra_lab/user/**/*.list.py: opens and merges all list.py files in /DATA/lenstra_lab/user/ and subfolders
+        ./listpyedit /DATA/lenstra_lab/user/**/*.list.py: opens and merges all list.py files in /DATA/lenstra_lab/user/
+            and subfolders
 
     wp@tl20200811
     """
 
     def __init__(self, files=None):
         self.n = 0
-        if not files is None:
+        if files is not None:
             self.list = listFile(files)
             self.lastFolder = os.path.split(files[0])[0]
         else:
@@ -391,10 +392,10 @@ class app():
         self.window.bind('<Alt-o>', self.openFromFolder)
         self.window.bind('<Control-s>', self.save)
         self.window.bind('<Alt-s>', self.saveas)
-        self.window.bind('<Prior>', lambda *args: self.nChangeKey(-1))
-        self.window.bind('<Next>', lambda *args: self.nChangeKey(1))
-        self.window.bind('<Home>', lambda *args: self.nChangeKey(-len(self.list)))
-        self.window.bind('<End>', lambda *args: self.nChangeKey(len(self.list)))
+        self.window.bind('<Prior>', lambda *args: self.n_change_key(-1))
+        self.window.bind('<Next>', lambda *args: self.n_change_key(1))
+        self.window.bind('<Home>', lambda *args: self.n_change_key(-len(self.list)))
+        self.window.bind('<End>', lambda *args: self.n_change_key(len(self.list)))
 
         # create a pulldown menu, and add it to the menu bar
         menubar = tk.Menu(self.window)
@@ -412,11 +413,11 @@ class app():
 
         # first row with # control and add/remove buttons
         self.UseVar = tk.BooleanVar()
-        self.Use = tk.Checkbutton(f, text='use', command=self.useChange, variable=self.UseVar)
+        self.Use = tk.Checkbutton(f, text='use', command=self.use_change, variable=self.UseVar)
         self.Use.grid(row=0, column=0)
         self.total = tk.Entry(f, width=10)
         self.total.grid(row=0, column=1)
-        self.N = valueBox(self.nChange, 1, 1, clip(len(self.list), 1, 1e6), True, height=25, master=f)
+        self.N = ValueBox(self.n_change, 1, 1, clip(len(self.list), 1, 1e6), True, height=25, master=f)
         self.N.grid(row=0, column=2)
         self.bAdd = tk.Button(f, text='+', command=self.add)
         self.bAdd.grid(row=0, column=3)
@@ -430,8 +431,8 @@ class app():
 
         def field(k):
             t = tk.StringVar()
-            t.trace('w', self.fieldChange(k, t))
-            return (t, CEntry(g, width=150, textvariable=t))
+            t.trace('w', self.field_change(k, t))
+            return t, CEntry(g, width=150, textvariable=t)
 
         lbl = ('rawPath', 'metadata', 'maxProj', 'trk_r', 'trk_g', 'comment')
         self.lbl = {k: field(k) for k in lbl}
@@ -445,34 +446,35 @@ class app():
         h.grid(row=7, column=1)
         self.fw = []
         for i in range(2):
-            self.fw.append(valueBox(self.FWchange(i), i, 0, 1e6, height=25, master=h))
+            self.fw.append(ValueBox(self.frame_window_change(i), i, 0, 1e6, height=25, master=h))
             self.fw[-1].grid(row=0, column=i)
 
         self.getInfo = tk.BooleanVar()
-        getInfo = tk.Checkbutton(g, text='info', command=self.disp, variable=self.getInfo)
-        getInfo.grid(row=8, column=0)
+        get_info = tk.Checkbutton(g, text='info', command=self.disp, variable=self.getInfo)
+        get_info.grid(row=8, column=0)
         self.info = tk.Label(g, width=150, justify=tk.LEFT, font=('Courier', 12))
         self.info.grid(row=8, column=1)
 
         self.disp()
         self.window.mainloop()
-        self.askSave()
+        self.ask_save()
 
     @property
     def changed(self):
-        if len(self.list)==0:
+        if len(self.list) == 0:
             return False
         elif self.list.file is None:
             return True
         else:
             return self.list != self.lastSavedList
 
-    def askSave(self):
+    def ask_save(self):
         if self.changed:
-            save = Message('File was not saved.', 'Save the file?', ('Save', 'Save as', 'No'), main=not self.active).answer
-            if save=='Save':
+            save = Message('File was not saved.', 'Save the file?',
+                           ('Save', 'Save as', 'No'), main=not self.active).answer
+            if save == 'Save':
                 self.save()
-            elif save=='Save as':
+            elif save == 'Save as':
                 self.saveas()
 
     @property
@@ -480,11 +482,11 @@ class app():
         try:
             self.window.winfo_exists()
             return True
-        except:
+        except Exception:
             return False
 
     def new(self, *args):
-        self.askSave()
+        self.ask_save()
         self.list = listFile()
         self.lastSavedList = self.list.copy()
         self.disp()
@@ -493,50 +495,51 @@ class app():
         self.list.sort()
         self.disp()
 
-    def fieldChange(self, k, v):
-        "One of the items in an entry is edited."
+    def field_change(self, k, v):
+        """ One of the items in an entry is edited. """
         def fun(*args):
             if len(self.list):
-                if not k in self.list[self.n] or (k in self.list[self.n] and not self.list[self.n][k]==v.get()):
+                if k not in self.list[self.n] or (k in self.list[self.n] and not self.list[self.n][k] == v.get()):
                     self.list[self.n][k] = v.get()
                 self.disp()
         return fun
 
-    def useChange(self):
-        "Whether an entry is used (not commented out) or not is changed."
+    def use_change(self):
+        """ Whether an entry is used (not commented out) or not is changed. """
         if len(self.list):
             self.list[self.n]['use'] = self.UseVar.get()
             self.disp()
 
-    def FWchange(self, n):
-        "The frameWindow of an entry is changed."
+    def frame_window_change(self, n):
+        """ The frameWindow of an entry is changed. """
         def fun(value):
             if len(self.list):
-                if not 'frameWindow' in self.list[self.n]:
+                if 'frameWindow' not in self.list[self.n]:
                     self.list[self.n]['frameWindow'] = [0, 0]
                 self.list[self.n]['frameWindow'][n] = value
                 self.disp()
         return fun
 
-    def nChangeKey(self, value):
-        "Which entry is displayed is changed by a keypress."
+    def n_change_key(self, value):
+        """ Which entry is displayed is changed by a keypress. """
         self.N.value += value
 
-    def nChange(self, value):
-        "Which entry is displayed is changed."
+    def n_change(self, value):
+        """ Which entry is displayed is changed. """
         self.n = value-1
         self.disp()
 
     def rm(self):
-        "An entry is removed."
+        """ An entry is removed. """
         if len(self.list):
             del self.list[self.n]
             self.disp()
 
     def add(self, *args):
-        "Extend the listfile by opening something."
+        """ Extend the listfile by opening something. """
         files = tk.filedialog.askopenfilenames(initialdir=self.lastFolder,
-                                               filetypes=(('list.py', '*.list.py'), ('trk_r', '*_trk_results_red.txt'), ('trk_g', '*_trk_results_green.txt'), ('all files', '*')))
+                                               filetypes=(('list.py', '*.list.py'), ('trk_r', '*_trk_results_red.txt'),
+                                                          ('trk_g', '*_trk_results_green.txt'), ('all files', '*')))
         if len(files):
             self.lastFolder = os.path.split(files[0])[0]
             for file in files:
@@ -582,7 +585,7 @@ class app():
                 v[0].set('')
             self.N.max = 1
         else:
-            if not self.N.max==len(self.list):
+            if not self.N.max == len(self.list):
                 self.N.max = len(self.list)
             for k, v in self.lbl.items():
                 if k in self.list[self.n]:
@@ -600,12 +603,12 @@ class app():
                 else:
                     self.Use.deselect()
             if self.getInfo.get():
-                self.info['text'] = re.sub('^#*\n', '', self.list.getInfo(self.n))
+                self.info['text'] = re.sub('^#*\n', '', self.list.get_info(self.n))
             else:
                 self.info['text'] = ''
 
 
-def ffind(expr, *args, **kwargs):
+def ffind(expr, folder=None, rec=3, once=False, directory=False):
     """
     --------------------------------------------------------------------------
     % usage: fnames=ffind(expr,folder,rec,'once','directory')
@@ -614,7 +617,7 @@ def ffind(expr, *args, **kwargs):
     % subdirectories
     %
     % inputs:
-    %   folder: startfolder path, (optional, default: current working dirextory)
+    %   folder: startfolder path, (optional, default: current working directory)
     %   expr:   string: regular expression to match
     %               example: to search for doc files do: '\.doc$'
     %           list or tuple: ffind will look for the folder in expr[0] starting
@@ -634,57 +637,32 @@ def ffind(expr, *args, **kwargs):
     %
     % date: Aug 2014
     % author: wp
-    % version: <01.00> (wp) <20140812.0000> Matlab implementation.
+    % version: <01.00> (wp) <20140812.0000>
     %          <02.00>      <20180214.0000> Add once and directory flags, rec
     %                                       now signifies the folder-depth.
     %          <03.00>      <20190326.0000> Python implementation.
     %--------------------------------------------------------------------------
     """
 
-    # argument parsing
-    for i in args:
-        if isinstance(i, Number):
-            rec = i
-        elif i == 'once':
-            once = True
-        elif i == 'directory':
-            directory = True
-        elif isinstance(i, str):
-            folder = i
-
-    for key, value in kwargs.items():
-        if key == 'once':
-            once = value
-        elif key == 'directory':
-            directory = value
-
-    if not 'rec' in vars().keys():
-        rec = 3
-    if not 'once' in vars().keys():
-        once = False
-    if not 'directory' in vars().keys():
-        directory = False
-    if not 'folder' in vars().keys():
+    if folder is None:
         folder = os.getcwd()
+    folder = os.path.join(folder, '')
 
-    if not folder[-1] == os.sep:
-        folder = folder + os.sep
-
-    if isinstance(expr, tuple):
-        expr = list(expr)
+    if not isinstance(expr, (str, re.Pattern)):
+        expr = [e if isinstance(e, re.Pattern) else re.compile(e, re.IGNORECASE) for e in expr]
 
     # search for the path in expr if needed
     if isinstance(expr, (list, tuple)):
         if len(expr) > 1:
-            folder = ffind(expr[0], folder, rec, 'directory')
+            folder = ffind(expr[0], folder, rec, directory=True)
             for e in expr[1:-1]:
                 folder_tmp = []
                 for f in folder:
-                    folder_tmp.extend(ffind(e, f, 0, 'directory'))
+                    folder_tmp.extend(ffind(e, f, rec, directory=True))
                 folder = folder_tmp
             fnames = []
             for f in folder:
-                fnames.extend(ffind(expr[-1], f, 0, once=once, directory=directory))
+                fnames.extend(ffind(expr[-1], f, rec, once=once, directory=directory))
                 if len(fnames) and once:
                     fnames = fnames[0]
                     break
@@ -695,26 +673,27 @@ def ffind(expr, *args, **kwargs):
 
     # an empty expression should match everything
     if not isinstance(expr, re.Pattern):
-        if not len(expr) > 0:
+        if not len(expr):
             expr = '.*'
         expr = re.compile(expr, re.IGNORECASE)
 
     try:
         lst = os.listdir(folder)
-    except:
+    except Exception:
         lst = []
 
     fnames = []
     dirnames = []
     for l in lst:
-        if re.search('^\.', l) != None:  # don't search in/for hidden things
+        if re.search(r'^\.', l) is not None:  # don't search in/for hidden things
             continue
-        if (os.path.isdir(folder + l) == directory) & (re.search(expr, l) != None):
+        if (os.path.isdir(folder + l) == directory) & (re.search(expr, l) is not None):
             fnames.append(folder + l)
             if once:
                 break
-        if rec and os.path.isdir(folder + l):  # list all folders, but don't go in them yet,
-            dirnames.append(folder + l)        # faster when the target is in the current folder and once=True
+        # list all folders, but don't go in them yet, faster when the target is in the current folder and once=True
+        if rec and os.path.isdir(folder + l):
+            dirnames.append(folder + l)
     if not once or not len(fnames):  # recursively go through all subfolders
         for d in dirnames:
             fnames.extend(ffind(expr, d, rec - 1, once=once, directory=directory))
@@ -722,7 +701,7 @@ def ffind(expr, *args, **kwargs):
                 break
 
     if once and stack()[1][3] != 'ffind':
-        if len(fnames):
+        if fnames:
             fnames = fnames[0]
         else:
             fnames = ''
@@ -732,9 +711,9 @@ def ffind(expr, *args, **kwargs):
 
 
 def main():
-    if len(sys.argv)>1:
+    if len(sys.argv) > 1:
         if sys.argv[1] in ('-h', '--help'):
-            print(app.__doc__)
+            print(App.__doc__)
             run = False
         else:
             files = sys.argv[1:]
@@ -743,8 +722,9 @@ def main():
         files = None
         run = True
     if run:
-        a = app(files)
+        a = App(files)
     imread.kill_vm()
+
 
 if __name__ == '__main__':
     main()

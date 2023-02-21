@@ -1,7 +1,7 @@
-from __future__ import print_function
 import re, os, json
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas
 from matplotlib.gridspec import GridSpec
 import scipy
 import scipy.signal
@@ -9,11 +9,12 @@ from scipy.cluster.vq import whiten, kmeans, vq
 from tqdm.auto import tqdm, trange
 from lfdfiles import SimfcsJrn
 from tllab_common.wimread import imread as imr
-from tllab_common.tiffwrite import IJTiffWriter
+from tiffwrite import IJTiffFile
 from tllab_common.misc import objFromDict
 from parfor import parfor
 import hidden_markov
 from itertools import product
+from contextlib import ExitStack
 
 if __package__ is None or __package__=='': #usual case
     from listpyedit import listFile
@@ -177,14 +178,14 @@ def readMetadata(pathToFile):
                     return objFromDict(Interval_ms=dwell_time*a['rperiods']*a['points per orbit'])
     with open(pathToFile, 'r') as f:
         content = f.read(-1)
-    if len(content)>5:
+    if len(content) > 5:
         # fix missing }
         if content[-2:] == ',\n':
             content = content[:-2]
         elif content[-1] == ',':
             content = content[:-1]
-        lines = content.replace('\\\"', '').splitlines() #2. but ignore \"
-        lines = ''.join([re.sub('\"[^\"]*\"', '', l) for l in lines]) #1. exclude {} between ""
+        lines = content.replace('\\\"', '').splitlines()  # 2. but ignore \"
+        lines = ''.join([re.sub('\"[^\"]*\"', '', l) for l in lines])  # 1. exclude {} between ""
         content += '}' * (lines.count('{') - lines.count('}'))
         tmpMD = json.loads(content)
         if 'Summary' in tmpMD:
@@ -192,100 +193,124 @@ def readMetadata(pathToFile):
     return objFromDict(**{})
 
 
-def loadExpData(fn, nMultiTau=8, ignore_comments=False):
-    if fn[-3:]=='.py': fn=fn[:-3]
-    if fn[-5:]!='.list': fn=fn+'.list'
-    fn=os.path.expanduser(fn)
-    lf = listFile(fn + '.py')
-    if not ignore_comments:
-        lf = lf.on
+class ExpData(list):
+    def __init__(self, lf=None, nMultiTau=8, ignore_comments=False):
+        if lf is None:
+            super().__init__()
+            return
+        if isinstance(lf, list):
+            super().__init__(lf)
+            return
+        super().__init__()
+        if not isinstance(lf, listFile):
+            if lf.endswith('.py'):
+                lf = lf[:-3]
+            if not lf.endswith('.list'):
+                lf += '.list'
+            lf = os.path.expanduser(lf)
+            lf = listFile(lf + '.py')
+        if not ignore_comments:
+            lf = lf.on
 
-    data = []
-    for a in tqdm(lf, desc='Loading experimental data'):
-        d = objFromDict(**{})
-        #    d.path=procDataPath
+        for a in tqdm(lf, desc='Loading experimental data'):
+            d = objFromDict(**{})
+            #    d.path=procDataPath
 
-        colors = [c for c in 'rgbkcmyw' if f'trk_{c}' in a]
-        for c in colors:
-            d[f'trk_{c}'] = np.loadtxt(a[f'trk_{c}'])
+            # colors = [c for c in 'rgbkcmyw' if f'trk_{c}' in a]
+            colors = tuple([key[4:] for key in a.keys() if key.startswith('trk_')])
+            d['colors'] = colors
+            for c in colors:
+                if a[f'trk_{c}'].endswith('.tsv'):
+                    d[f'trk_{c}'] = pandas.read_csv(a[f'trk_{c}'], sep='\t')[['x', 'y', 'i_peak', 'T', 'link']].to_numpy()
+                else:
+                    d[f'trk_{c}'] = np.loadtxt(a[f'trk_{c}'])
 
-        if 'detr' in a: # Columns of detr: frame, red mean, red sd, green mean, green sd, red correction raw, red correction polyfit, green correction raw, green correction polyfit
-            d.detr=np.loadtxt(a.detr)
-            rn=d.detr[:,2]/d.detr[0,2]; x=np.where(abs(np.diff(rn))<.1)[0]; pf=np.polyfit(x,np.log(rn[x]),8)
-            rf=np.exp(np.sum([d.detr[:,0]**ii*pf[-1-ii] for ii in range(len(pf))],0))
-            gn=d.detr[:,4]/d.detr[0,4]; x=np.where(abs(np.diff(gn))<.1)[0]; pf=np.polyfit(x,np.log(gn[x]),8)
-            gf=np.exp(np.sum([d.detr[:,0]**ii*pf[-1-ii] for ii in range(len(pf))],0))
-            d.detr=np.c_[d.detr,rn,rf,gn,gf]
+            if 'detr' in a: # Columns of detr: frame, red mean, red sd, green mean, green sd, red correction raw, red correction polyfit, green correction raw, green correction polyfit
+                d.detr=np.loadtxt(a.detr)
+                rn=d.detr[:,2]/d.detr[0,2]; x=np.where(abs(np.diff(rn))<.1)[0]; pf=np.polyfit(x,np.log(rn[x]),8)
+                rf=np.exp(np.sum([d.detr[:,0]**ii*pf[-1-ii] for ii in range(len(pf))],0))
+                gn=d.detr[:,4]/d.detr[0,4]; x=np.where(abs(np.diff(gn))<.1)[0]; pf=np.polyfit(x,np.log(gn[x]),8)
+                gf=np.exp(np.sum([d.detr[:,0]**ii*pf[-1-ii] for ii in range(len(pf))],0))
+                d.detr=np.c_[d.detr,rn,rf,gn,gf]
 
-        if 'frameWindow' in a:  d.frameWindow=a.frameWindow
-        if 'actualDt' in a: d.actualDt=d.dt=a.actualDt
-        else: d.dt=0
-        if 'hrsTreat' in a: d.hrsTreat=a.hrsTreat
+            if 'frameWindow' in a:  d.frameWindow=a.frameWindow
+            if 'actualDt' in a: d.actualDt=d.dt=a.actualDt
+            else: d.dt=0
+            if 'hrsTreat' in a: d.hrsTreat=a.hrsTreat
 
-        if 'rawPath' in a: d.rawPath=a.rawPath
-        if 'rawTrans' in a: d.rawTrans=a.rawTrans
+            if 'rawPath' in a: d.rawPath=a.rawPath
+            if 'rawTrans' in a: d.rawTrans=a.rawTrans
 
-        for i, j in product(colors, colors):
-            if f'fcs_{i}{j}' in a:
-                d[f'fcs_{i}{j}'] = np.loadtxt(a[f'fcs_{i}{j}'], skiprows=7)
+            for i, j in product(colors, colors):
+                if f'fcs_{i}{j}' in a:
+                    d[f'fcs_{i}{j}'] = np.loadtxt(a[f'fcs_{i}{j}'], skiprows=7)
 
-        try:
-            d.name = re.findall('^(.*)_[^_]+\.txt$', a[f'trk_{colors[0]}'])[0]
-        except Exception:
-            d.name = a[f'trk_{colors[0]}']
+            try:
+                d.name = re.findall(r'^(.*)_[^_]+\.(?:txt|tsv)$', a[f'trk_{colors[0]}'])[0]
+            except Exception:
+                d.name = a[f'trk_{colors[0]}']
 
-        if 'ctrlOffset' in a:  d.ctrlOffset=np.array(a.ctrlOffset)
-        if 'transfLev' in a:  d.transfLev=np.array(a.transfLev)
+            if 'ctrlOffset' in a:  d.ctrlOffset=np.array(a.ctrlOffset)
+            if 'transfLev' in a:  d.transfLev=np.array(a.transfLev)
 
-        if 'maxProj' in a:
-            d.maxProj=a.maxProj
-            # if not os.path.exists(d.maxProj): print("!! Warning: file '%s' does not exist."%(a.maxProj))
+            if 'maxProj' in a:
+                d.maxProj=a.maxProj
+                # if not os.path.exists(d.maxProj): print("!! Warning: file '%s' does not exist."%(a.maxProj))
 
-        if 'metadata' in a:
-            d.metadata=readMetadata(a.metadata)
-            if d.dt==0: d.dt=d.metadata.Interval_ms/1000.
-            #else: print "Using provided dt=%fs, not %fs from metadata."%(d.dt,d.metadata.Interval_ms/1000.)
-        elif 'timeInterval' in a:
-            d.dt=int(float(a.timeInterval))
-        # else:
-        #     print("!! Warning: No metadata and no dt provided. Using dt=1."); d.dt=1.
+            if 'metadata' in a:
+                try:
+                    d.metadata=readMetadata(a.metadata)
+                    if d.dt==0:
+                        d.dt=d.metadata.Interval_ms/1000.
+                except Exception:
+                    with imr(d.rawPath) as im:
+                        d.dt = im.timeinterval
+                #else: print "Using provided dt=%fs, not %fs from metadata."%(d.dt,d.metadata.Interval_ms/1000.)
+            elif 'timeInterval' in a:
+                d.dt=int(float(a.timeInterval))
+            # else:
+            #     print("!! Warning: No metadata and no dt provided. Using dt=1."); d.dt=1.
 
-        i = 1 if a.trk_r.endswith('trk') else 2  # orbital vs widefield files
-        d.t = d[f'trk_{colors[0]}'][:, -i] * d.dt
+            i = 1 if a[f'trk_{colors[0]}'].endswith('trk') else 2  # orbital vs widefield files
+            d.t = d[f'trk_{colors[0]}'][:, -i] * d.dt
 
-        for c in colors:
-            d[c] = d[f'trk_{c}'][:, -(i + 1)]
+            for c in colors:
+                d[c] = d[f'trk_{c}'][:, -(i + 1)]
 
-        if 'detr' in d: # Detrending from s.d. polyfit
-            for c, i in zip('rg', (6, 8)):
-                if c in d:
-                    d[c] /= d.detr[:, i]
+            if 'detr' in d: # Detrending from s.d. polyfit
+                for c, i in zip('rg', (6, 8)):
+                    if c in d:
+                        d[c] /= d.detr[:, i]
 
-        if not 'frameWindow' in d:
-            d.frameWindow=[0, d.t.shape[0]]
-        else:
-            if d.frameWindow[0]<0:
-                d.frameWindow[0] = 0
-            if d.frameWindow[1] > d.t.shape[0]-1:
-                d.frameWindow[1] = d.t.shape[0]-1
-
-        if nMultiTau != 0:  # TODO: consider more colors than just rg
-            if d.frameWindow[1]-d.frameWindow[0]:
-                d.fcsRecomp=True
-                d.G, d.tau = compG_multiTau(np.c_[d.r,d.g][d.frameWindow[0]:d.frameWindow[1]].T, d.t[d.frameWindow[0]:d.frameWindow[1]], 0)
-                # Write .fcs4 files
-                np.savetxt(d.name+'.fcs4', np.c_[d.tau,d.G[0,0],d.G[1,1],d.G[0,1],d.G[1,0]],'%12.5e  ',
-                           header='Tau (in s)     Grr            Ggg            Grg            Ggr', comments='#')
+            if not 'frameWindow' in d:
+                d.frameWindow=[0, d.t.shape[0]]
             else:
-                d.fcsRecomp = False
-                d.G = np.zeros((2,2,0))
-                d.tau = np.zeros(0)
-        else:
-            d.fcsRecomp=False
-            d.tau=d.fcs_rr[:,0]*d.dt/d.fcs_rr[0,0]
-            d.G=np.array([[d.fcs_rr[:,1],d.fcs_rg[:,1]],[d.fcs_gr[:,1],d.fcs_gg[:,1]]])        
-        data.append(d)
-    return data
+                if d.frameWindow[0]<0:
+                    d.frameWindow[0] = 0
+                if d.frameWindow[1] > d.t.shape[0]-1:
+                    d.frameWindow[1] = d.t.shape[0]-1
+
+            if nMultiTau != 0:  # TODO: consider more colors than just rg
+                if d.frameWindow[1]-d.frameWindow[0]:
+                    d.fcsRecomp=True
+                    d.G, d.tau = compG_multiTau(np.vstack([d[c] for c in colors]).T[d.frameWindow[0]:d.frameWindow[1]].T, d.t[d.frameWindow[0]:d.frameWindow[1]], 0)
+                    # d.G, d.tau = compG_multiTau(np.c_[d.r, d.g][d.frameWindow[0]:d.frameWindow[1]].T, d.t[d.frameWindow[0]:d.frameWindow[1]], 0)
+                    # Write .fcs4 files
+                    np.savetxt(d.name+'.fcs4', np.c_[d.tau, d.G[0, 0], d.G[1, 1], d.G[0, 1], d.G[1, 0]], '%12.5e  ',
+                               header='Tau (in s)     Grr            Ggg            Grg            Ggr', comments='#')
+                else:
+                    d.fcsRecomp = False
+                    d.G = np.zeros((2, 2, 0))
+                    d.tau = np.zeros(0)
+            else:
+                d.fcsRecomp=False
+                d.tau=d.fcs_rr[:,0]*d.dt/d.fcs_rr[0,0]
+                d.G=np.array([[d.fcs_rr[:,1],d.fcs_rg[:,1]],[d.fcs_gr[:,1],d.fcs_gg[:,1]]])
+            self.append(d)
+
+    def __getitem__(self, item):
+        r = super().__getitem__(item)
+        return self.__class__(r) if isinstance(r, list) else r
 
 
 #################
@@ -353,6 +378,7 @@ def showTracking(Data, channels=None, expPathOut=None, sideViews=None, zSlices=N
 
         wp@tl20200310
     """
+    # TODO: specify colors per channel, metadata to tiffs
     # add squares around the spots in seperate channel (from empty image)
     squareStamp = [
         np.r_[-5, -5, -5, -5, -5, -5, -5, -5, -4, -3, -2, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 4, 3, 2, -2, -3, -4],
@@ -370,8 +396,6 @@ def showTracking(Data, channels=None, expPathOut=None, sideViews=None, zSlices=N
     Data, DataXY = [d for d in zip(*D)]
 
     Cell = [int(re.findall('(?<=cellnr_)\d+', data.name)[0]) for data in Data]
-
-    Outfile = [expPathOut + "_cellnr_" + str(cell) + "_track" + "Side" * sideViews + ".tif" for cell in Cell]
 
     if os.path.exists(Data[0].maxProj):
         maxFile = Data[0].maxProj
@@ -393,9 +417,13 @@ def showTracking(Data, channels=None, expPathOut=None, sideViews=None, zSlices=N
             except:
                 pass
 
+        Outfile = [expPathOut + "_cellnr_" + str(cell) + "_track" + "Side" * sideViews + ".tif" for cell in Cell]
+
         frameRange = frameRange or (0, raw.shape[4])
         # nbPixPerZ = int(np.round(raw.deltaz/raw.pxsize))
-        with IJTiffWriter(Outfile, (4, 1, (frameRange[1] - frameRange[0]))) as out:
+        with ExitStack() as stack:
+            out = {outfile: stack.enter_context(IJTiffFile(outfile, (4, 1, (frameRange[1] - frameRange[0]))))
+                   for outfile in Outfile}
             Box = []
             Loc_xy = []
             Width = []
@@ -404,7 +432,7 @@ def showTracking(Data, channels=None, expPathOut=None, sideViews=None, zSlices=N
                 box = np.hstack((np.floor(np.vstack(dataXY).min(0)),
                                  np.ceil(np.vstack(dataXY).max(0)))).astype('int') + [-20, -20, 20, 20]
                 box = np.maximum(np.minimum(box * [1, 1, -1, -1], (box.reshape(2, 2).mean(0).repeat(2).reshape(2, 2).astype(int)
-                                + [-50, 50]).T.flatten() * [1, 1, -1, -1]), -np.array((0, 0) + raw.shape[:2])) * [1, 1, -1, -1]
+                                + [-50, 50]).T.flatten() * [1, 1, -1, -1]), -np.array((0, 0) + raw.shape[:2][::-1])) * [1, 1, -1, -1]
                 loc_xy = [np.round(d - box[:2] + 0.5).astype('int') for d in dataXY]
                 width = (box[2] - box[0]) + sideViews * len(zSlices) * nbPixPerZ
                 height = (box[3] - box[1]) + sideViews * len(zSlices) * nbPixPerZ
@@ -443,15 +471,21 @@ def showTracking(Data, channels=None, expPathOut=None, sideViews=None, zSlices=N
                         frame[:, c * width:(c + 1) * width] = im.astype('uint16')
                         if nCh > 1:
                             frame[:, -width:] = im.astype('uint16')
-                        out.save(outfile, frame, c, 0, t)
+                        out[outfile].save(frame, c, 0, t)
 
                 for outfile, loc_xy, width, height in zip(Outfile, Loc_xy, Width, Height):
                     frame = np.zeros((height, (nCh + (nCh > 1)) * width), 'uint16')
                     for c in range(nCh):
                         if nCh > 1:
-                            frame[loc_xy[c][t, 1] + squareStamp[1], loc_xy[c][t, 0] + squareStamp[0] + nCh * width] = 65535
-                        frame[loc_xy[c][t, 1] + squareStamp[1], loc_xy[c][t, 0] + squareStamp[0] + c * width] = 65535
-                    out.save(outfile, frame, 3, 0, t)
+                            xy = np.vstack((loc_xy[c][t, 1] + squareStamp[1],
+                                            loc_xy[c][t, 0] + squareStamp[0] + nCh * width))
+                            xy = xy[:, (xy[0] >= 0) * (xy[1] >= 0) *
+                                       (xy[0] < frame.shape[0]) * (xy[1] < frame.shape[1])]
+                            frame[xy[0], xy[1]] = 65535
+                        xy = np.vstack((loc_xy[c][t, 1] + squareStamp[1], loc_xy[c][t, 0] + squareStamp[0] + c * width))
+                        xy = xy[:, (xy[0] >= 0) * (xy[1] >= 0) * (xy[0] < frame.shape[0]) * (xy[1] < frame.shape[1])]
+                        frame[xy[0], xy[1]] = 65535
+                    out[outfile].save(frame, 3, 0, t)
 
 
 macro1color="""open("__imPath__");

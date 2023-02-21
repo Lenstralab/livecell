@@ -5,8 +5,10 @@ import os
 import shutil
 import yaml
 import copy
-from LiveCellAnalysis.pipeline_livecell_track_movies import pipeline, getPaths, expandExpList
-import tllab_common
+try:
+    from LiveCellAnalysis.pipeline_livecell_track_movies import pipeline, getPaths, expandExpList
+except ImportError:
+    pass
 from tllab_common.wimread import imread
 from tllab_common.misc import getConfig
 
@@ -70,15 +72,15 @@ test_heta   = make_test_pipeline('pipeline_livecell_track_movies_Heta.yml')
 ## ----- This part runs the tests -----
     
 if __name__ == '__main__':
-    if len(sys.argv)<2:
-        py = ['3.8']
+    if len(sys.argv) < 2:
+        py = ['']
     else:
         py = sys.argv[1:]
 
     for p in py:
-        print('Testing using python {}'.format(p))
-        print('Loaded tllab_common code from {}'.format(tllab_common.__file__))
-        os.system('python{} -m pytest -n=12 -p no:warnings --verbose {}'.format(p, fname))
+        print(f'Testing using python {p}')
+        print(f'Loaded tllab_common code from {__file__}')
+        os.system(f'python{p} -m pytest -n=12 -p no:warnings --verbose {fname}')
         print('')
 
     imread.kill_vm()

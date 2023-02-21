@@ -1,28 +1,30 @@
 # Live Cell Analysis
-as used by Gowthaman et al, Brouwer et al and Patel et al.
-
-## Cloning the repository
-Install git: https://git-scm.com/
-
-    git clone https://github.com/Lenstralab/livecell.git
-    cd livecell
-
-# Version of the code used for Patel et al.
-    git checkout 13bff5dc90acec9cf1f22cf7711412ee899113c7
-
-# Version of the code used for Brouwer et al.
-    git checkout d521de19239cd95a4decc091751b47b94542a31c
-
-# Version of the code used for Gowthaman et al.
-    git checkout 1edd8b572ebc9944618fe48c23060bb3b6d3b1a3
+as used by Gowthaman et al, Brouwer et al, Patel et al and Meeussen et al.
 
 ## Installation
 If not done already:
-- Install python (at least 3.7): https://www.python.org
-- Install pip and git
+- Install python (at least 3.8): https://www.python.org
+- Install pip 
+- Install git: https://git-scm.com/
 
-Then install the livecell script (up to 5 minutes):
+## Cloning the repository and installing
+    git clone https://github.com/Lenstralab/livecell.git
+    cd livecell
 
+# Version of the code used for Meeussen et al.
+    git checkout
+    pip install -e .[tllab_common] --user
+
+# Version of the code used for Patel et al.
+    git checkout 13bff5dc90acec9cf1f22cf7711412ee899113c7
+    pip install -e . --user
+
+# Version of the code used for Brouwer et al.
+    git checkout d521de19239cd95a4decc091751b47b94542a31c
+    pip install -e . --user
+
+# Version of the code used for Gowthaman et al.
+    git checkout 1edd8b572ebc9944618fe48c23060bb3b6d3b1a3
     pip install -e . --user
 
 ## Usage

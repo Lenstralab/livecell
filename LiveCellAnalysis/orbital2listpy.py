@@ -152,7 +152,7 @@ def save_trks(file, trk_folder=None, includeZ=False, fw_start=50):
     else:
         raise Exception('txt file does not exist')
 
-    # Save data from bin files to trk files and make make carpet plots
+    # Save data from bin files to trk files and make carpet plots
     trk_files = [os.path.join(trk_folder, os.path.split(bin_file)[1] + '.trk') for bin_file in bin_files]
     lf_dict = {'metadata': jrn_file}
     fig = plt.figure(figsize=A4)

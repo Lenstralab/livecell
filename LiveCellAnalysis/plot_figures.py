@@ -43,7 +43,8 @@ def write_hist(pdf, color, dA, sdThreshold):
     gs = GridSpec(2, 1, figure=fig)
 
     fig.add_subplot(gs[0,0])
-    plt.hist(bg, np.clip(int(np.ceil(np.sqrt(len(bg)))), 1, 100), density=True, color=color)
+    if not np.all(np.invert(np.isfinite(bg))):
+        plt.hist(bg, np.clip(int(np.ceil(np.sqrt(len(bg)))), 1, 100), density=True, color=color)
     xl = plt.xlim()
     X = np.linspace(xl[0], xl[1], 1000)
     if sd > 0:

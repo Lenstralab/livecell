@@ -35,6 +35,8 @@ SingleCellParams: True
 
 #  -mTauOrder: 0: fft is used for correlation function calculation, integer > 0: multi-tau algorithm is used with order mTauOrder, which resamples every order steps to smooth out errors at large time lag.
 #  -ccfFunction: function to use for calculating the average correlation function; default: empty (None) or '' --> using the cf of the mean signal, other option: LineFit or SC --> using a linefit for correcting stationary effects, ONLY use when data is somewhat uniform
+#  -ccfPearson: if True and ccfFunction is LineFit or SC, then the values of the acfs and ccfs are Pearson correlations
+#  -ccfSubtractMean: if ccfFunction: SC - whether to subtract the mean from the signal before correlating.
 #  -fitWindow: used with ccfFunction=LineFit: window in frames for fitting the acf (both green and red) and ccf (both negative and positive sides), [start, end], will omit linefitting if fitWindow is None
 #  -scaleFactors: either None or list of scalefactors with same length as nr of traces, to scale specific traces (for example to correct for day effects).
 #  -ChannelsToAnalyze: [0] is red only, [1] is green only, [0,1] is red and green.
@@ -45,6 +47,8 @@ SingleCellParams: True
 
 mTauOrder: 0
 ccfFunction:
+ccfPearson:
+ccfSubtractMean: True
 fitWindow:
 scaleFactors:
 ChannelsToAnalyze: [0, 1]

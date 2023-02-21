@@ -4,9 +4,11 @@ import os
 import sys
 import re
 import copy as copy2
+import pandas
 import scipy
 from PIL import Image
 from PIL import ImageFilter
+from time import time
 import matplotlib.pyplot as plt
 from datetime import datetime
 from tqdm.auto import trange, tqdm
@@ -14,16 +16,16 @@ import numpy as np
 import shutil
 import yaml
 import pickle
-# import math
-# import rtree
 from itertools import product
-from skimage import registration
 from skimage import filters
 from matplotlib.backends.backend_pdf import PdfPages
-from parfor import parfor, chunks
+from contextlib import ExitStack
+from parfor import parfor, Chunks
 from tllab_common.wimread import imread as imr
-from tllab_common.tiffwrite import IJTiffWriter, tiffwrite
+from tllab_common.transforms import Transform
 from tllab_common.findcells import findcells
+from tllab_common.misc import ipy_debug
+from tiffwrite import IJTiffFile, tiffwrite
 
 if __package__ is None or __package__ == '':  # usual case
     import spotDetection_functions as sdf
@@ -31,12 +33,16 @@ if __package__ is None or __package__ == '':  # usual case
     import fluctuationAnalysis
     import plot_figures
     import misc
+    import trackmate
+    import _version
 else:
     from . import spotDetection_functions as sdf
     from . import dataAnalysis_functions as daf
     from . import fluctuationAnalysis
     from . import plot_figures
     from . import misc
+    from . import trackmate
+    from . import _version
 
 if not '__file__' in locals():  # when executed using execfile
     import inspect
@@ -59,7 +65,7 @@ def expandExpList(params, parameter_file):
                 pCorrectDrift = l * [False]
         except Exception:
             pCorrectDrift = l * [False if pCorrectDrift is None else pCorrectDrift]
-        if not len(pTSregfile):
+        if not pTSregfile:
             pTSregfile = l * [[]]
 
     expList, CorrectDrift, TSregfile = [], [], []
@@ -74,6 +80,10 @@ def expandExpList(params, parameter_file):
                     expList.append(os.path.join(pathExp, item.string))
                     CorrectDrift.append(drift)
                     TSregfile.append(tsreg)
+        elif os.path.dirname(pathExp).endswith('.nd'):  # is metamorph file with position
+            expList.append(pathExp)
+            CorrectDrift.append(drift)
+            TSregfile.append(tsreg)
         elif not os.path.exists(pathExp):  # filename without extension, add all we can find, normally just 1 of course
             for ext in extensions:
                 if os.path.exists(pathExp + ext):
@@ -134,8 +144,8 @@ def getPaths(params, parameter_file=None):
                                           + dateTime + ".yml")
             with open(parameter_file, 'w') as f:
                 yaml.safe_dump(params, f)
-        shutil.copyfile(os.path.abspath(__file__), os.path.join(params['expPathOut']
-                                                                + "_pipeline_livecell_track_movies.py"))
+        shutil.copyfile(os.path.abspath(__file__), f"{params['expPathOut']}_pipeline_livecell_track_movies.py")
+        shutil.copyfile(os.path.abspath(_version.__file__), f"{params['expPathOut']}_livecell_version.py")
 
     if params['swapColors']:  # define where in image file to find different colors, idx 0: red, 1: green
         params['channels'] = params['ChannelsToAnalyze'][::-1]
@@ -176,29 +186,52 @@ def getPaths(params, parameter_file=None):
             params['dosum'] = True
             params['sumFile'] = params['expPathOut'] + "_sum.tif"
 
+        if params['cellMask']['method'].lower() == 'findcell':
+            params['mask_file'] = params['expPathOut'] + "_sum_cells_mask.tif"
+        elif params['cellMask']['method'].lower() == 'trackmate':
+            params['mask_file'] = params['expPathOut'] + "_cells_mask.tif"
+            params['cell_track_file'] = params['expPathOut'] + "_cells_track.tsv"
+        else:
+            raise ValueError(f"Unknown cell mask method: {params['cellMask']['method']}")
+
     if params['RegisterChannels']:
         with imr(params['pathIn'], transform=True) as im:
-            params['masterChannel'] = im.masterch
             params['transform'] = im.transform
 
 
 def correctDrift(params):
     channel = 0
+    # TODO: figure out how to use all channels
     if os.path.exists(params['expPathOut'] + "_drift.txt"):
         params['drift'] = np.loadtxt(params['expPathOut'] + "_drift.txt")
     else:
         with imr(params['pathIn'], dtype=float) as im:
-            fmaxz0 = filters.gaussian(im.max(channel, None, 0), 5)
+            # divide the sequence into groups of about 50 frames,
+            # compare each frame to the frame in the middle of the group and compare these middle frames to each other
+            t_groups = [list(chunk) for chunk in Chunks(range(im.shape[4]), size=50)]
+            t_keys = [int(np.round(np.mean(t_group))) for t_group in t_groups]
+            t_pairs = [(int(np.round(np.mean(t_group))), frame) for t_group in t_groups for frame in t_group]
+            t_pairs.extend(zip(t_keys, t_keys[1:]))
+            fmaxz_keys = {t_key: filters.gaussian(im.max(channel, None, t_key), 5) for t_key in t_keys}
 
-            @parfor(range(im.shape[4]), (im, channel, fmaxz0), desc='Calculating drift', terminator=imr.kill_vm)
-            def drift(t, im, channel, fmaxz0):
-                if t==0:
-                    return np.array([0, 0])
+            @parfor(t_pairs, (im, channel, fmaxz_keys), desc='Calculating drift', terminator=imr.kill_vm)
+            def drift(t_key_t, im, channel, fmaxz_keys):
+                t_key, t = t_key_t
+                if t_key == t:
+                    return 0, 0
                 else:
                     fmaxz = filters.gaussian(im.max(channel, None, t), 5)
-                    return -registration.phase_cross_correlation(fmaxz0, fmaxz)[0][::-1].astype(int)
-        np.savetxt(params['expPathOut'] + "_drift.txt", drift, fmt='%d')
-        params['drift'] = drift
+                    return Transform(fmaxz_keys[t_key], fmaxz, 'translation').parameters[-2:]
+
+            drift = np.array(drift)
+            drift_keys_cum = np.zeros(2)
+            for drift_keys, t_group in zip(np.vstack((-drift[0], drift[im.shape[4]:])), t_groups):
+                drift_keys_cum += drift_keys
+                drift[t_group] += drift_keys_cum
+            drift = drift[:im.shape[4]]
+
+        params['drift'] = np.round(drift).astype(int)
+        np.savetxt(params['expPathOut'] + "_drift.txt", params['drift'], fmt='%d')
 
 
 def maxProjection(params):
@@ -206,10 +239,15 @@ def maxProjection(params):
     do max and sum projections
     will not switch channels, or omit, just save them in the same order as the raw
     """
-    with imr(params['pathIn']) as im, \
-            tqdm(total=len(params['ChannelsToAnalyze']) * params['frames'], desc='Max intensity projections') as bar, \
-            IJTiffWriter((params['domax']*params['maxFile'], params['dosum']*params['sumFile']),
-            ((len(params['ChannelsToAnalyze']), 1, params['frames']), (len(params['ChannelsToAnalyze']), 1, 1))) as tifs:
+    with ExitStack() as stack:
+        im = imr(params['pathIn'])
+        bar = stack.enter_context(tqdm(total=len(params['ChannelsToAnalyze']) * params['frames'],
+                                       desc='Max intensity projections'))
+        if params['domax']:
+            maxfile = stack.enter_context(IJTiffFile(params['maxFile'],
+                                          (len(params['ChannelsToAnalyze']), 1, params['frames'])))
+        if params['dosum']:
+            sumfile = stack.enter_context(IJTiffFile(params['sumFile'], (len(params['ChannelsToAnalyze']), 1, 1)))
         for c in params['ChannelsToAnalyze']:
             imSum = np.zeros(im.shape[:2], 'float')
             for t in range(params['frames']):
@@ -218,28 +256,32 @@ def maxProjection(params):
                     imMax = misc.translateFrame(imMax, params['drift'][t])
                 imSum += imMax
                 if params['domax']:
-                    tifs.save(params['maxFile'], imMax.astype('uint16'), c, 0, t)
+                    maxfile.save(imMax.astype('uint16'), c, 0, t)
                 bar.update()
-            imSum *= 65536 / np.nanmax(imSum)  # rescale to 16 bit
             if params['dosum']:
-                tifs.save(params['sumFile'], imSum.astype('uint16'), c, 0, 0)
+                imSum *= 65536 / np.nanmax(imSum)  # rescale to 16 bit
+                sumfile.save(imSum.astype('uint16'), c, 0, 0)
 
 
 def cellMask(params):
-    with imr(params['sumFile']) as im:
-        if len(params['channels'])>1:
-            km = im(params['channels'][1], 0, 0) # uses green image
-        else:
-            km = im(params['channels'][0], 0, 0)
-        cells = findcells(km, ccdist=params.get('findCellsCCdist'), threshold=params.get('findCellsThr'))[0]
-        if params['RegisterChannels']:
-            #save a mask for each channel, they might be different because of the transforming
-            stack = np.dstack([params['transform'](c).frame(cells) for c in range(im.shape[2])])
-            stack = stack.astype('uint8') if stack.max() < 256 else stack.astype('uint16')
-            tiffwrite(params['expPathOut'] + "_sum_cells_mask.tif", stack, 'XYC', colormap='glasbey')
-        else:
-            cells = cells.astype('uint8') if cells.max() < 256 else cells.astype('uint16')
-            tiffwrite(params['expPathOut'] + "_sum_cells_mask.tif", cells, colormap='glasbey')
+    if params['cellMask']['method'].lower() == 'findcell':
+        with imr(params['sumFile']) as im:
+            if len(params['channels'])>1:
+                km = im(params['channels'][1], 0, 0)  # uses green image
+            else:
+                km = im(params['channels'][0], 0, 0)
+            cells = findcells(km, **params['cellMask'])[0]
+            if params['RegisterChannels']:
+                #save a mask for each channel, they might be different because of the transforming
+                stack = np.dstack([params['transform'](c).frame(cells) for c in range(im.shape[2])])
+                stack = stack.astype('uint8') if stack.max() < 256 else stack.astype('uint16')
+                tiffwrite(params['mask_file'], stack, 'XYC', colormap='glasbey', pxsize=im.pxsize)
+            else:
+                cells = cells.astype('uint8') if cells.max() < 256 else cells.astype('uint16')
+                tiffwrite(params['mask_file'], cells, colormap='glasbey', pxsize=im.pxsize)
+    elif params['cellMask']['method'].lower() == 'trackmate':
+        trackmate.stardist_trackmate(params['maxFile'], params['mask_file'], params['cell_track_file'],
+                                     **params['cellMask'])
 
 
 def optimizeTreshold(params):
@@ -266,24 +308,28 @@ def optimizeTreshold(params):
                 imBpass = sdf.bpass(im, params['psfPx'] - 0.2, params['psfPx'] + 0.2)
 
                 if params['TSregfile'] != []:
-                    imTS = np.zeros(size)
-                    for TS in range(len(listCellnr)):
-                        imTStmp2 = create_circular_mask(size[0], size[1], center=[TSreg[TS][j][1], TSreg[TS][j][0]],
-                                                        radius=params['TSregRadius']) * (listCellnr[TS])
-                        imTS = np.fmax(imTS, imTStmp2)
+                    imTS = create_cell_array(params, size, listCellnr, TSreg, j, channel)
 
                 for i, threshval in enumerate(threshvals):
                     celllisttmp = []
                     imBinary = (imBpass > threshval * np.var(imBpass) ** .5) * 1.  # Binary image for high threshold
                     objects = scipy.ndimage.find_objects(scipy.ndimage.label(imBinary)[0])
                     cooGuess = np.array([[np.r_[obj[1]].mean(), np.r_[obj[0]].mean()] for obj in objects])
-                    for c in range(cooGuess.shape[0]):
-                        if params['TSregfile'] == []:
-                            cellnr = cellArray[int(cooGuess[c, 1]), int(cooGuess[c, 0]), 0]
-                        else:
-                            cellnr = int(imTS[int(cooGuess[c, 1]), int(cooGuess[c, 0])])
-                        if cellnr > 0 and cellnr != 32767:
-                            celllisttmp.append(cellnr)
+                    with ExitStack() as stack:
+                        if isinstance(cellArray, str):
+                            cell_array_imr = stack.enter_context(imr(cellArray))
+
+                        for c in range(cooGuess.shape[0]):
+                            if params['TSregfile'] == []:
+                                if isinstance(cellArray, str):
+                                    cellnr = int(cell_array_imr(channel, 0, j)
+                                                 [int(cooGuess[c, 1]), int(cooGuess[c, 0])])
+                                else:
+                                    cellnr = cellArray[int(cooGuess[c, 1]), int(cooGuess[c, 0]), 0]
+                            else:
+                                cellnr = int(imTS[int(cooGuess[c, 1]), int(cooGuess[c, 0])])
+                            if cellnr > 0 and cellnr != 32767:
+                                celllisttmp.append(cellnr)
 
                     spotslist[i] = spotslist[i] + len(celllisttmp)
                     spotslistunique[i] = spotslistunique[i] + len(set(celllisttmp))
@@ -327,13 +373,9 @@ def guessHighThreshold(params, imtmp, channel, nbIm, TSregfile, listCellnr, TSre
     def guessThreshold(params, imBpass, t, threshold):
         size = imBpass.shape
         if TSregfile:
-            cA = np.zeros(size)
-            for TS in range(len(listCellnr)):
-                center = transformCoords([TSreg[TS][t][1], TSreg[TS][t][0]], channel, params, False)
-                imTStmp2 = create_circular_mask(*size, center=center, radius=TSregRadius) * (listCellnr[TS])
-                cA = np.fmax(cA, imTStmp2).astype(int)
+            cA = create_cell_array(params, size, listCellnr, TSreg, t, channel)
         elif cellArray is None:
-            cA = np.ones(size)
+            cA = np.ones(size, dtype=int)
         elif cellArray.shape[2] > 1:
             cA = cellArray[:, :, channel]
         else:
@@ -399,7 +441,7 @@ def localizeHighThresholdPar(params, imtmp, channel, cooGuess_matrix, nbIm, maxC
     #             index.insert(i, (*p, *p))
     #     return np.array(keep)
 
-    @parfor(chunks(cooGuess_matrix, r=5), ({'RegisterChannels': params['RegisterChannels'],
+    @parfor(Chunks(cooGuess_matrix, r=5), ({'RegisterChannels': params['RegisterChannels'],
                                            'transform': params.get('transform')},), desc='Fitting high intensity spots')
     def fun(cgchunk, params0):
         data = []
@@ -469,11 +511,7 @@ def localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregf
     cooGuess = cooGuess1
 
     if TSregfile != []:
-        imTS = np.zeros(size)
-        for TS in range(len(listCellnr)):
-            center = transformCoords([TSreg[TS][j][1], TSreg[TS][j][0]], channel, params, False)
-            imTStmp2 = create_circular_mask(size[0], size[1], center=center, radius=TSregRadius) * (listCellnr[TS])
-            imTS = np.fmax(imTS, imTStmp2)
+        imTS = create_cell_array(params, size, listCellnr, TSreg, j, channel)
 
     # fit each spot with 2D gaussian with tilted plane. The GaussianMaskFit2 function is described in spotDetection_Functions.py
     for i in range(cooGuess.shape[0]):
@@ -503,10 +541,13 @@ def transformCoords(coo, channel, params, forward=True):
         (raw to transformed) or backwards (transformed to raw) a few times.
     """
     if params['RegisterChannels']:
+        ndim = np.ndim(coo)
+        coo = np.array(coo, ndmin=2)
         if forward:
-            return params['transform'](channel, 0).coords(np.array(coo))
+            coo = params['transform'](channel, 0).coords(coo)
         else:
-            return params['transform'].inverse(channel, 0).coords(np.array(coo))
+            coo = params['transform'].inverse(channel, 0).coords(coo)
+        return coo[0] if ndim == 1 else coo
     else:
         return np.array(coo)
 
@@ -526,11 +567,7 @@ def localizeLowThreshold(params, im, t, channel, size, cooGuess2_matrix, TSregfi
     im = im.astype("uint16")
 
     if TSregfile != []:
-        imTS = np.zeros(size)
-        for TS in range(len(listCellnr)):
-            center = transformCoords([TSreg[TS][t][1], TSreg[TS][t][0]], channel, params, False)
-            imTStmp2 = create_circular_mask(size[0], size[1], center=center, radius=TSregRadius) * (listCellnr[TS])
-            imTS = np.fmax(imTS, imTStmp2)
+        imTS = create_cell_array(params, size, listCellnr, TSreg, t, channel)
 
     cooGuess = cooGuess2_matrix[t]  # load data from matrix (spots were found above)
     cooGuess = transformCoords(cooGuess, channel, params, False)
@@ -583,11 +620,20 @@ def localizeLowThreshold(params, im, t, channel, size, cooGuess2_matrix, TSregfi
                             fitResultsall2.append(np.r_[intensity, coo, tilt, t])  # add results to fitResultsall2 (spots for all images in timeseries)
 
 
-def fillGap(params, im, t, channel, TSregfile, size, listCellnr, TSreg, dataCell2, dataDigital, dataCellLoc2,
-            dataCell3, dataCellLoc3, fitResultsall3):
+def coo_guess_gap(params, TSregfile, imTS, dataCellLoc2, t_alt, cell, listCellnr, TSreg, t, channel):
+    if TSregfile != []:
+        cellnr = int(imTS[int(dataCellLoc2[t_alt, cell, 2]), int(
+            dataCellLoc2[t_alt, cell, 1])] - 1)  # note, different cellnr from above, 1 already subtracted
+        if cell != cellnr:
+            for index in range(len(listCellnr)):
+                if listCellnr[index] == cell + 1:
+                    ind = index
+            return transformCoords([TSreg[ind][t][1], TSreg[ind][t][0]], channel, params, False)
+    return transformCoords(dataCellLoc2[t_alt, cell, 1:3], channel, params, False)
 
-    TSregRadius = params['TSregRadius']
 
+def fill_gap(params, im, pxsize, tracks, t, channel, TSregfile, size, listCellnr, TSreg, dataCell2, dataDigital, dataCellLoc2,
+             dataCell3, dataCellLoc3, fitResultsall3):
     psfPx = params['psfPx']
     winSize = params['winSize']
 
@@ -595,45 +641,21 @@ def fillGap(params, im, t, channel, TSregfile, size, listCellnr, TSreg, dataCell
     im = sdf.hotpxfilter(im.astype("float32"))
     im = im.astype("uint16")
 
-    if TSregfile != []:
-        imTS = np.zeros(size)
-        for TS in range(len(listCellnr)):
-            center = transformCoords([TSreg[TS][t][1], TSreg[TS][t][0]], channel, params, False)
-            imTStmp2 = create_circular_mask(size[0], size[1], center=center, radius=TSregRadius) * (listCellnr[TS])
-            imTS = np.fmax(imTS, imTStmp2)
+    imTS = create_cell_array(params, size, listCellnr, TSreg, t, channel) if TSregfile else None
 
     # run through each cell in image
     for cell in range(dataCell2.shape[1]):
-        # check if spot was found with high or low threshold (dataDigital = 0) and check if there were any spots found in other time frames in that cell
+        # check if spot was found with high or low threshold (dataDigital = 0)
+        # and check if there were any spots found in other time frames in that cell
         if sum(dataDigital[:, cell]) != 0 and sum(dataDigital[:, cell] > 0) != 0:
             # determine first burst
             if dataDigital[0, cell] > 0:
                 startFirstBurst = 0
             else:
                 startFirstBurst = (np.where(np.diff(dataDigital[:, cell]) > 0)[0][0]) + 1
-            # endFirstBurst = where(diff(dataDigital[:,cell])==-1)[0][0]
             if dataCell2[t, cell] == 0:
-                # checks if spot is in timeframe before the first burst (first high intensity spot). If so, use position first burst to fit the intensity.
                 if t < startFirstBurst:
-                    # fit 2D gaussian at fixed position
-                    #intensity, coo, tilt = sdf.GaussianMaskFit2(im, dataCellLoc2[startFirstBurst, cell, 1:3],
-                    #                                            psfPx, optLoc=0, winSize=winSize)
-                    if TSregfile != []:
-                        cellnr = int(imTS[int(dataCellLoc2[startFirstBurst, cell, 2]), int(dataCellLoc2[startFirstBurst, cell, 1])] - 1)  # note, different cellnr from above, 1 already subtracted
-                        if cell != cellnr:
-                            for index in range(len(listCellnr)):
-                                 if listCellnr[index] == cell + 1:
-                                     ind = index
-                            cooGuess = transformCoords([TSreg[ind][t][1], TSreg[ind][t][0]], channel, params, False)
-                            intensity, coo, tilt = sdf.GaussianMaskFit2(im, cooGuess, psfPx, optLoc=0, winSize=winSize)
-                        else:
-                            cooGuess = transformCoords(dataCellLoc2[startFirstBurst, cell, 1:3], channel, params, False)
-                            intensity, coo, tilt = sdf.GaussianMaskFit2(im, cooGuess, psfPx, optLoc=0, winSize=winSize)
-                    else:
-                        cooGuess = transformCoords(dataCellLoc2[startFirstBurst, cell, 1:3], channel, params, False)
-                        intensity, coo, tilt = sdf.GaussianMaskFit2(im, cooGuess, psfPx, optLoc=0, winSize=winSize)  # fit 2D gaussian at fixed position
-
-                # checks if spot is in timeframe after the first burst (first high intensity spot). If so, use position last burst to fit the intensity.
+                    t_alt = startFirstBurst
                 elif t > startFirstBurst:
                     # determine last burst
                     endBursts = np.where(np.diff(dataDigital[:, cell]) < 0)[0]
@@ -641,39 +663,40 @@ def fillGap(params, im, t, channel, TSregfile, size, listCellnr, TSreg, dataCell
                     b = min(t - endBursts[pos])
                     minpos = np.where(t - endBursts == b)[0][0]
                     lastBurst = endBursts[minpos]
-                    # fit 2D gaussian at fixed position
-                    #intensity, coo, tilt = sdf.GaussianMaskFit2(im, dataCellLoc2[lastBurst, cell, 1:3], psfPx,
-                    #                                            optLoc=0, winSize=winSize)
-                    if TSregfile != []:
-                        cellnr = int(imTS[int(dataCellLoc2[lastBurst, cell, 2]), int(dataCellLoc2[lastBurst, cell, 1])] - 1)  # note, different cellnr from above, 1 already subtracted
-                        if cell != cellnr:
-                            for index in range(len(listCellnr)):
-                                 if listCellnr[index] == cell + 1:
-                                     ind = index
-                            cooGuess = transformCoords([TSreg[ind][t][1], TSreg[ind][t][0]], channel, params, False)
-                            intensity, coo, tilt = sdf.GaussianMaskFit2(im, cooGuess, psfPx, optLoc=0, winSize=winSize)
-                        else:
-                            cooGuess = transformCoords(dataCellLoc2[lastBurst, cell, 1:3], channel, params, False)
-                            intensity, coo, tilt = sdf.GaussianMaskFit2(im, cooGuess, psfPx, optLoc=0, winSize=winSize)
-                    else:
-                        cooGuess = transformCoords(dataCellLoc2[lastBurst, cell, 1:3], channel, params, False)
-                        intensity, coo, tilt = sdf.GaussianMaskFit2(im, cooGuess, psfPx, optLoc=0, winSize=winSize)  # fit 2D gaussian at fixed position
+                    t_alt = lastBurst
+                else:
+                    raise ValueError(f'Somehow the start of a burst and a gap are both at frame {t}.')
 
+                # fit 2D gaussian at fixed position
+                cooGuess = coo_guess_gap(params, TSregfile, imTS, dataCellLoc2, t_alt, cell, listCellnr, TSreg, t,
+                                         channel)
+
+                if tracks is not None:
+                    # keep the spot fixed relative to the cell instead of relative to the image
+                    cooGuess += (tracks.loc[cell + 1, t][['x', 'y']] - tracks.loc[cell + 1, t_alt][['x', 'y']]) / pxsize
+
+                intensity, coo, tilt = sdf.GaussianMaskFit2(im, cooGuess, psfPx, optLoc=0, winSize=winSize)
                 coo = transformCoords(coo, channel, params, True)
 
                 # write data to arrays
                 dataCell3[t, cell] = intensity
                 dataCellLoc3[t, cell, :] = np.r_[intensity, coo, tilt]
-                fitResultsall3.append(np.r_[intensity, coo, tilt, t])  # add results to fitResultsall2 (spots for all images in timeseries)
+                # add results to fitResultsall2 (spots for all images in timeseries)
+                fitResultsall3.append(np.r_[intensity, coo, tilt, t])
 
 
 def TSmask(params):
     TSregfile = params['TSregfile']
     if TSregfile == []:
         # open cell mask and get number of cells
-        with imr(params['expPathOut'] + "_sum_cells_mask.tif") as mask:
-            cellArray = np.dstack([mask(c) for c in range(mask.shape[2])]).astype('int')
-        maxCellid = np.amax(cellArray)
+        if 'cell_track_file' in params:
+            trackmate_table = pandas.read_table(params['cell_track_file'])
+            maxCellid = int(trackmate_table['label'].max()) + 1
+            cellArray = params['mask_file']
+        else:
+            with imr(params['mask_file']) as mask:
+                cellArray = np.dstack([mask(c) for c in range(mask.shape[2])]).astype('int')
+            maxCellid = np.amax(cellArray)
         TSreg = None
         listCellnr = None
     else:
@@ -723,6 +746,13 @@ def localizeMaster(params):
 
     print("Running Localize")
 
+    if 'cell_track_file' in params:
+        tracks = pandas.read_table(params['cell_track_file'], index_col=0)
+        tracks = pandas.concat((tracks, trackmate.interpolate_missing(tracks, params['frames'])))
+        tracks = tracks.set_index(['label', 't'])
+    else:
+        tracks = None
+
     if fillIn == 1 and fillInColors == "red" and fillInRadius > 0:
         ChannelsToAnalyze = ChannelsToAnalyze[::-1]
 
@@ -755,19 +785,14 @@ def localizeMaster(params):
                 if channel == 0: color = "red"; thresholdSD = thresholdSD_Red
                 if channel == 1: color = "green"; thresholdSD = thresholdSD_Green
 
-                if fillIn == 1 and fillInColors == "red" and fillInRadius == 0 and color == "red":
-                    continue
-                elif fillIn == 1 and fillInColors == "green" and fillInRadius == 0 and color == "green":
+                if fillIn == 1 and fillInColors == color and fillInRadius == 0:
                     continue
 
                 if fillIn == 1 and fillInRadius > 0 and fillInColors == color:
                     params['TSregRadius'] = fillInRadius
-                    af = os.listdir(params['pathOut'])
-                    if fillInColors == "red" and color == "red":
-                        TSregfile = [file for file in af if file[-22:] == "_trk_results_green.txt"]
-                    elif fillInColors == "green" and color == "green":
-                        TSregfile = [file for file in af if file[-20:] == "_trk_results_red.txt"]
-                    if TSregfile != []:
+                    TSregfile = [file for file in os.listdir(params['pathOut'])
+                                 if file.endswith(f'_trk_results_{color}.txt')]
+                    if TSregfile:
                         cellArray = None
                         TSreg = []
                         if "trk_results" in TSregfile[0]:  ### check if input locfile from previous localization
@@ -798,16 +823,22 @@ def localizeMaster(params):
                                                                                       cooGuess1_matrix, nbIm, maxCellid)
                 else:
                     # run through each image to determine most intense spots (high threshold) and weaker spots (low threshold)
-                    for j in trange(nbIm, desc='Fitting high intensity spots'):
-                        im = copy2.deepcopy(imtmp[:, :, channels[channel], :, j].reshape(size))
-                        if cellArray is None:
-                            cA = None
-                        elif cellArray.shape[2]>1:
-                            cA = cellArray[:,:,channels[channel]]
-                        else:
-                            cA = cellArray[:,:,0]
-                        localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregfile, listCellnr, TSreg,
-                                              cA, fitResultsall, dataCell, dataDigital, dataCellLoc)
+                    with ExitStack() as stack:
+                        if isinstance(cellArray, str):  # each frame has a separate cell array made by trackmate
+                            cell_array_imr = stack.enter_context(imr(cellArray, dtype=int))
+
+                        for j in trange(nbIm, desc='Fitting high intensity spots'):
+                            im = copy2.deepcopy(imtmp[:, :, channels[channel], :, j].reshape(size))
+                            if cellArray is None:
+                                cA = None
+                            elif isinstance(cellArray, str):
+                                cA = cell_array_imr(channels[channel], 0, j)  # TODO: multiple channels and registration
+                            elif cellArray.shape[2] > 1:
+                                cA = cellArray[:, :, channels[channel]]
+                            else:
+                                cA = cellArray[:, :, 0]
+                            localizeHighThreshold(params, im, channel, j, size, cooGuess2_matrix, TSregfile, listCellnr,
+                                                  TSreg, cA, fitResultsall, dataCell, dataDigital, dataCellLoc)
 
                 # Save the results of spots found with high threshold in a text file, save images to tif file: columns are: integrated intensity, x position, y position, offset of tilted plane, x tilt, y tilt, framenumber
                 fnTxt = params['expPathOut'] + "_loc_results_" + color + "_threshold_SD" + str(thresholdSD) + ".txt"
@@ -833,16 +864,21 @@ def localizeMaster(params):
                 fitResultsall2 = [] # all spots found with lower intensity threshold
 
                 # run through each image to find most weaker intensity spots (low threshold)
-                for j in trange(nbIm, desc='Fitting low intensity spots'):
-                    im = copy2.deepcopy(imtmp[:, :, channels[channel], :, j].reshape(size))
-                    if cellArray is None:
-                        cA = None
-                    elif cellArray.shape[2]>1:
-                        cA = cellArray[:,:,channels[channel]]
-                    else:
-                        cA = cellArray[:,:,0]
-                    localizeLowThreshold(params, im, j, channel, size, cooGuess2_matrix, TSregfile, listCellnr, TSreg,
-                                         cA, dataCell, dataDigital, dataCell2, dataCellLoc2, fitResultsall2)
+                with ExitStack() as stack:
+                    if isinstance(cellArray, str):  # each frame has a separate cell array made by trackmate
+                        cell_array_imr = stack.enter_context(imr(cellArray, dtype=int))
+                    for j in trange(nbIm, desc='Fitting low intensity spots'):
+                        im = copy2.deepcopy(imtmp[:, :, channels[channel], :, j].reshape(size))
+                        if cellArray is None:
+                            cA = None
+                        elif isinstance(cellArray, str):
+                            cA = cell_array_imr(channels[channel], 0, j)  # TODO: multiple channels and registration
+                        elif cellArray.shape[2]>1:
+                            cA = cellArray[:,:,channels[channel]]
+                        else:
+                            cA = cellArray[:,:,0]
+                        localizeLowThreshold(params, im, j, channel, size, cooGuess2_matrix, TSregfile, listCellnr,
+                                             TSreg, cA, dataCell, dataDigital, dataCell2, dataCellLoc2, fitResultsall2)
 
                 # Save the results of spots found with low threshold in a text file: columns are: integrated intensity, x position, y position, offset of tilted plane, x tilt, y tilt, framenumber
                 fnTxt2 = params['expPathOut'] + "_loc_results_" + color + "_threshold_SD" + str(thresholdSD-diffThresholdSD) + ".txt"
@@ -867,8 +903,8 @@ def localizeMaster(params):
                 #### run through each image and if no spot was found for a cell in that timeframe, fill in the intensity at position of previous spot (or first spot in movie)
                 for t in trange(nbIm, desc='Filling gaps with no spots'):
                     im = imtmp[:, :, channels[channel], :, t].reshape(size)
-                    fillGap(params, im, t, channel, TSregfile, size, listCellnr, TSreg, dataCell2, dataDigital,
-                            dataCellLoc2, dataCell3, dataCellLoc3, fitResultsall3)
+                    fill_gap(params, im, imtmp.pxsize, tracks, t, channel, TSregfile, size, listCellnr, TSreg,
+                             dataCell2, dataDigital, dataCellLoc2, dataCell3, dataCellLoc3, fitResultsall3)
 
                 # Save the results of filledGap spots in a text file: columns are: integrated intensity, x position, y position, offset of tilted plane, x tilt, y tilt, framenumber
                 fnTxt3 = params['expPathOut'] + "_loc_results_" + color + "_filledGap.txt"
@@ -906,7 +942,7 @@ def localizeMaster(params):
                             + "+thresholdlow_SD" + str(thresholdSD - diffThresholdSD)+ "+all+mask.tif"
 
                     # We open the max proj and the new tiff file and transfer the data frame by frame.
-                    # IJTiffWriter takes the filename of the new tiff file and the shape (C, Z, T) of the new file,
+                    # IJTiffFile takes the filename of the new tiff file and the shape (C, Z, T) of the new file,
                     #  it creates a new object which we call tiff.
                     # Calling im(c, z, t) gives exactly 1 frame in with 2 dimensions from the max proj.
                     # We save a frame by calling tiff.save(frame, c, z, t), where c, z, t is the position in the tiff
@@ -914,12 +950,17 @@ def localizeMaster(params):
                     # We do need to make sure the datatype is supported, im and the imSpotsAll had datatype float64,
                     #  which is not supported.
 
-                    with imr(params['maxFile']) as im, IJTiffWriter(fname, (5, 1, nbIm)) as tiff:
-
+                    with imr(params['maxFile']) as im, IJTiffFile(fname, (5, 1, nbIm)) as tiff, ExitStack() as stack:
+                        cell_array_per_frame = False
                         if TSregfile == []:
                             # open cell mask and make outline
-                            with imr(params['expPathOut'] + "_sum_cells_mask.tif") as mask:
-                                cellmaskArray = mask(channels[channel]).astype('int')
+                            if os.path.exists(f"{params['expPathOut']}_cells_mask.tif"):
+                                cell_array_per_frame = True
+                                cell_array_imr = stack.enter_context(imr(f"{params['expPathOut']}_cells_mask.tif",
+                                                                         dtype=int))
+                            else:
+                                with imr(f"{params['expPathOut']}_sum_cells_mask.tif") as mask:
+                                    cellmaskArray = mask(channels[channel]).astype('int')
 
 
                         for t in trange(nbIm, desc='Writing image to check thresholds'):
@@ -931,12 +972,8 @@ def localizeMaster(params):
                                 if len(data)>0:
                                     for a in data:
                                         if a[6] == t:
-                                            x = int(a[2]) + squareStamp[1]
-                                            y = int(a[1]) + squareStamp[0]
-                                            x[x > 1023] = 1023
-                                            x[x < 0] = 0
-                                            y[y > 1023] = 1023
-                                            y[y < 0] = 0
+                                            x = np.clip(int(a[2]) + squareStamp[1], 0, size[0] - 1)
+                                            y = np.clip(int(a[1]) + squareStamp[0], 0, size[1] - 1)
                                             imSpots[x, y] = 1
                                 return imSpots
 
@@ -954,14 +991,11 @@ def localizeMaster(params):
 
                             #### add mask to image
                             if TSregfile != []:
-                                cellmaskArray = np.zeros(size)
-                                for TS in range(len(listCellnr)):
-                                    imTStmp2 = create_circular_mask(size[0], size[1],
-                                                                    center=[TSreg[TS][t][1], TSreg[TS][t][0]],
-                                                                    radius= params['TSregRadius']) * (listCellnr[TS])
-                                    cellmaskArray = np.fmax(cellmaskArray, imTStmp2)
+                                cellmaskArray = create_cell_array(params, size, listCellnr, TSreg, t, channel)
+                            elif cell_array_per_frame:
+                                cellmaskArray = cell_array_imr(channels[channel], 0, t)
                             cellmask = Image.fromarray(cellmaskArray.astype('uint8'), 'L')
-                            cellmask=  cellmask.filter(ImageFilter.FIND_EDGES)
+                            cellmask = cellmask.filter(ImageFilter.FIND_EDGES)
                             celloutline = np.array(cellmask) >= 1
                             celloutline = celloutline*1
 
@@ -1074,9 +1108,6 @@ def calcBackground(params):
     psfPx = params['psfPx']
     winSize = params['winSize']
     channels = params['channels']
-
-    print("Calculating background")
-
     DistBgPx = 5
     dir = [[1, 1], [1, -1], [-1, -1], [-1, 1]]
 
@@ -1111,33 +1142,33 @@ def calcBackground(params):
 
             # 3D array with rows as bg nr and columns as timepoints and z as information on 1st background spot:
             #   integrated intensity, x position, y position, offset of tilted plane, x tilt, y tilt
-            bg = np.zeros((len(dir), nbIm, 6))
 
-            for cell in trange(len(listCellnr), desc='Calculating background'):
-                if channel == 0:
-                    trk_results = np.loadtxt(os.path.join(pathOut, trk_red[cell]), ndmin=2)
-                if channel == 1:
-                    trk_results = np.loadtxt(os.path.join(pathOut, trk_green[cell]), ndmin=2)
-
+            # bg = np.zeros((len(dir), nbIm, 6))
+            # for cell in trange(len(listCellnr), desc='Calculating background'):
+            @parfor(range(len(listCellnr)), desc='Calculating background')
+            def fun(cell):
+                bg = np.zeros((len(dir), nbIm, 6))
+                trk_results = np.loadtxt(os.path.join(pathOut, trk_red[cell] if channel == 0 else trk_green[cell]),
+                                         ndmin=2)
                 coo = transformCoords(trk_results[:, :2], channel, params, False)
                 for j in range(nbIm):
                     im = copy2.deepcopy(imtmp(channels[channel], 0, j))
-
                     for i in range(len(dir)):
                         try:
                             bg[i, j, :] = np.r_[sdf.GaussianMaskFit2(im, coo[j]+DistBgPx*np.array(dir[i]),
-                                                                           psfPx, optLoc=0, winSize=winSize)]
-                        except:
-                            print("Fitting background {} at different location for cell {}".format(i+1, listCellnr[cell]))
+                                                                     psfPx, optLoc=0, winSize=winSize)]
+                        except Exception:
+                            print(f'Fitting background {i+1} at different location for cell {listCellnr[cell]}')
                             bg[i, j, :] = np.r_[sdf.GaussianMaskFit2(im, coo[j]-2*DistBgPx*np.array(dir[i]),
-                                                                           psfPx, optLoc=0, winSize=winSize)]
+                                                                     psfPx, optLoc=0, winSize=winSize)]
                         bg[i, j, :2] = transformCoords(bg[i, j, :2], channel, params, True)
 
                 for i in range(len(dir)):
-                    np.savetxt("{}_cellnr_{}_trk_results_bg{}_{}.txt".format(expPathOut, listCellnr[cell], i+1, color),
-                              np.c_[bg[i, :, 1], bg[i, :, 2], bg[i, :, 0],
-                              np.c_[range(bg.shape[1])], np.zeros((nbIm))],
-                              delimiter="\t", fmt="%1.3f")
+                    np.savetxt(f'{expPathOut}_cellnr_{listCellnr[cell]}_trk_results_bg{i+1}_{color}.txt',
+                               np.c_[bg[i, :, 1], bg[i, :, 2], bg[i, :, 0],
+                               np.c_[range(bg.shape[1])], np.zeros(nbIm)],
+                               delimiter='\t', fmt='%1.3f')
+
 
 def writeFiles(params):
     ChannelsToAnalyze = params['ChannelsToAnalyze']
@@ -1224,7 +1255,7 @@ def writeFiles(params):
 
     # load data based on list file
     listFilesOutEnd = params['expPathOut'] + ".list.py"
-    params['loadedData'] = daf.loadExpData(listFilesOutEnd)
+    params['loadedData'] = daf.ExpData(listFilesOutEnd)
 
     # write PDFs of trace and correlation functions for each cell.
     for i in range(len(params['loadedData'])):
@@ -1237,7 +1268,7 @@ def writeMovies(params):
     if not 'loadedData' in params:
         # load data based on list file
         listFilesOutEnd = os.path.join(params['expPathOut'] + ".list.py")
-        params['loadedData'] = daf.loadExpData(listFilesOutEnd)
+        params['loadedData'] = daf.ExpData(listFilesOutEnd)
 
     channels = [params['channels'][c] for c in params['ChannelsToAnalyze']]
 
@@ -1271,7 +1302,7 @@ def computeCorrelFunc(params):
     print("Calculating correlation functions")
     # load data
     listFilesOutEnd = os.path.join(params['expPathOut'] + ".list.py")
-    loadedData = daf.loadExpData(listFilesOutEnd)
+    loadedData = daf.ExpData(listFilesOutEnd)
 
     ss = fluctuationAnalysis.mcSigSet([fluctuationAnalysis.mcSig(dA.t, np.vstack((dA.r, dA.g)), frameWindow=dA.frameWindow) for dA in loadedData])
     ss.alignSignals()
@@ -1286,6 +1317,17 @@ def create_circular_mask(h, w, center, radius):
     dist_from_center = np.sqrt((X - center[0])**2 + (Y-center[1])**2)
     mask = dist_from_center <= radius
     return mask
+
+
+def create_cell_array(params, size, listCellnr, TSreg, t, channel):
+    TSregRadius = params['TSregRadius']
+    cell_array = np.zeros(size, dtype=int)
+
+    for TS, cell in zip(TSreg, listCellnr):
+        center = transformCoords([TS[t][1], TS[t][0]], channel, params, False)
+        cell_array = np.fmax(cell_array, create_circular_mask(*size, center=center, radius=TSregRadius) * cell)
+    return cell_array
+
 
 def pipeline(params):
     ''' Runs the pipeline for livecell track movies
@@ -1369,13 +1411,15 @@ def pipeline(params):
 
 
 def main():
+    ipy_debug()
+    tm = time()
     if len(sys.argv) < 2:
         parameter_files = [os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                                       'pipeline_livecell_track_movies_parameters.yml'))]
     else:
         parameter_files = sys.argv[1:]
 
-    if len(parameter_files)==1:
+    if len(parameter_files) == 1:
         parameter_file = parameter_files[0]
         if not os.path.exists(parameter_file):
             raise FileNotFoundError('Could not find the parameter file.')
@@ -1391,9 +1435,10 @@ def main():
                 print(misc.color('Exception while working on: {}'.format(parameter_file), 'r:b'))
 
     print('------------------------------------------------')
-    print(misc.color('Pipeline finished.', 'g:b'))
+    print(misc.color('Pipeline finished, took {} seconds.'.format(time() - tm), 'g:b'))
+    imr.kill_vm()  # stop java used for imread, needed to let python exit
+    trackmate.kill_vm()
 
 
 if __name__ == '__main__':
     main()
-    imr.kill_vm()

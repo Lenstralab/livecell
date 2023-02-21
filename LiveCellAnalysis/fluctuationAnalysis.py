@@ -1,4 +1,3 @@
-from __future__ import print_function
 from scipy import fft
 import numpy as np
 import warnings
@@ -164,7 +163,7 @@ class mcSig(objFromDict):
 
 
 class mcSigSet(objFromDict):
-    """ Set of multi-channel signals, and some methods for correlation.
+    """ Set of multichannel signals, and some methods for correlation.
 
         Example:
             ss = mcSigSet([mcSig])
@@ -177,7 +176,7 @@ class mcSigSet(objFromDict):
             sigsAlign: The list of signals, aligned and time-extended. If all
                 signals in sigs have the same time vector, then sigs==sigsAlign.
             t: Time vector of the aligned signals and of the average signal.
-            v: Average multi-channel signal. Axes of v are: channel, time and
+            v: Average multichannel signal. Axes of v are: channel, time and
                 mean/SEM/coverage. The coverage represents the number of signals
                 involved in the computation of a given data point.
             tau: Vector of time lags (same unit as t).
@@ -190,7 +189,7 @@ class mcSigSet(objFromDict):
     """
 
     def __init__(self, sigs, sigsName='sigs'):
-        """ By default sigs (list of mcSig) are saved in the attribute .sigs. """
+        """ By default, sigs (list of mcSig) are saved in the attribute .sigs. """
         super(mcSigSet, self).__init__(**{sigsName: sigs})
 
     def alignSignals(self, t0=None, verb=False):
@@ -230,7 +229,7 @@ class mcSigSet(objFromDict):
         self.sigsAlign = sigsAlign
         self.t = t
 
-    def compAvgCF_SC(self, methEnd='trim', mT=0, fitWindow=None, bootstrap=False):
+    def compAvgCF_SC(self, methEnd='trim', mT=0, fitWindow=None, bootstrap=False, pearson=False, subtract_mean=True):
         """ The Stefono interpretation of averaging and ccf normalization:
             Subtract and divide by a global mean.
             G: raw, N: steady state correction, P: G - N - linefit
@@ -239,22 +238,40 @@ class mcSigSet(objFromDict):
         tlen = [s.mask.sum(1) for s in self.sigsAlign]  # number unmasked in signal
         mean_global = wmean([wmean(s.v, s.mask, 1) for s in self.sigsAlign], tlen, 0)  # scalar
         mean_signal = wmean([s.v for s in self.sigsAlign], [s.mask for s in self.sigsAlign], 0)  # trace
+        if pearson:
+            std_global = np.sqrt(wmean([wmean((s.v.T - wmean(s.v, s.mask, 1)).T ** 2, s.mask, 1)
+                                        for s in self.sigsAlign], tlen, 0))  # scalar
 
         if not bootstrap:
             self.fun = 'SC'
-            self.methEnd, self.mT, self.fitWindow = methEnd, mT, fitWindow
+            self.methEnd, self.mT, self.fitWindow, self.pearson = methEnd, mT, fitWindow, pearson
+            self.subtract_mean = subtract_mean
 
         for s in self.sigsAlign:
             if not bootstrap:
                 s.weight = np.round(s.mask.shape[-1] * mcR_FFT(s.mask, meth='wrap' if methEnd == 'wrap' else 'pad0',
                                                                mT=mT))
                 s.W = mcR_FFT(s.mask, meth=methEnd, mT=mT)
-            s.M, s.tau = mcR_FFT(s.mask * (s.v.T - mean_global).T, s.t, methEnd, mT)
+            if subtract_mean:
+                s.M, s.tau = mcR_FFT(s.mask * (s.v.T - mean_global).T, s.t, methEnd, mT)
+            else:
+                s.M, s.tau = mcR_FFT(s.mask * s.v, s.t, methEnd, mT)
             s.M[s.weight == 0] = np.nan
             s.M /= s.W
-            s.G = divide(s.M, mean_global)
-            s.N = divide(mcR_FFT(s.mask * np.nan_to_num((mean_signal.T - mean_global).T), meth=methEnd, mT=mT),
-                         mean_global)
+            if pearson:
+                s.G = divide(s.M, std_global)
+                if subtract_mean:
+                    s.N = divide(mcR_FFT(s.mask * np.nan_to_num((mean_signal.T - mean_global).T), meth=methEnd, mT=mT),
+                                 std_global)
+                else:
+                    s.N = divide(mcR_FFT(s.mask * np.nan_to_num(mean_signal), meth=methEnd, mT=mT), std_global)
+            else:
+                s.G = divide(s.M, mean_global)
+                if subtract_mean:
+                    s.N = divide(mcR_FFT(s.mask * np.nan_to_num((mean_signal.T - mean_global).T), meth=methEnd, mT=mT),
+                                 mean_global)
+                else:
+                    s.N = divide(mcR_FFT(s.mask * np.nan_to_num(mean_signal), meth=methEnd, mT=mT), mean_global)
             s.N[s.weight == 0] = np.nan
             s.N /= s.W
             s.P = s.G - s.N
@@ -356,13 +373,15 @@ class mcSigSet(objFromDict):
         nBs = nBs or 10000
         N = len(self.sigsAlign)
         @parfor(chunks(np.random.randint(0, N, (nBs, N)), s=250, r=2), (deepcopy(self.sigsAlign), self.get('methEnd'),
-                self.get('mT'), self.get('fitWindow'), self.fun, vars), desc='Bootstrapping')
-        def par(II, sa, methEnd, mT, fitWindow, fun, vars):
+                self.get('mT'), self.get('fitWindow'), self.fun, vars, self.get('pearson'), self.get('subtract_mean')),
+                desc='Bootstrapping')
+        def par(II, sa, methEnd, mT, fitWindow, fun, vars, pearson, subtract_mean):
+            np.seterr(all='ignore')
             R = {var: [0, 0, 0] for var in vars}
             for ii in II:
                 s = mcSigSet([deepcopy(sa[i]) for i in ii], 'sigsAlign')
                 if fun == 'SC':
-                    s.compAvgCF_SC(methEnd, mT, fitWindow, True)
+                    s.compAvgCF_SC(methEnd, mT, fitWindow, True, pearson, subtract_mean)
                 else:
                     s.compAvgCF(methEnd, mT, True)
                 for i in vars:  # storing cumulative sums of var and var^2, to calculate std without storing all values

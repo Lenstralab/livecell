@@ -65,12 +65,41 @@ zSlices: 9
 frames: 240
 timeInterval: 1
 
-#### parameters for findCells:
-#  -findCellsCCdist: distance between cells, example for yeast: 25, example for mammalian cells: 100
-#  -findCellsThr: manual threshold for cell segmention, if automated Otsu thresholding fails
 
-findCellsCCdist: 25
-findCellsThr:
+#### Cell segmentation parameters (cell masking):
+#  Indent these parameters under cellMask below!
+#  -method: either findcell or trackmate
+#
+#  parameters for findcell:
+#    ccdist:        (approximate) minimum distance between the centers of cells, good values: yeast: 25, mamalian: 150
+#    optional parameters to debug/finetune findcells:
+#    threshold:     value used to threshold the image, default: use Otsu
+#    thres:         divide the image in thres x thres blocks and use a different threshold in each of them,
+#                   the image size should be an integer multiple of thres
+#    smooth:        smooth the image before using it
+#    minfeatsize:   remove features smaller than minfeatsize
+#    dilate:        >0: make every cell dilate px larger, <0: make them smaller
+#    thresholdnuc, thresnuc, smoothnuc, minfeatsizenuc, dilatenuc: parameters applying to imnuc
+#    removeborders: remove any cells (and their nuclei) touching any borders (case with nan's unhandled atm), default: True
+#
+#  parameters for trackmate (see trackmate in fiji for more details):
+#      MIN_AREA: 20
+#      MAX_FRAME_GAP: 2
+#      ALTERNATIVE_LINKING_COST_FACTOR: 1.05
+#      LINKING_MAX_DISTANCE: 15.0
+#      GAP_CLOSING_MAX_DISTANCE: 15.0
+#      SPLITTING_MAX_DISTANCE: 15.0
+#      ALLOW_GAP_CLOSING: True
+#      ALLOW_TRACK_SPLITTING: False
+#      ALLOW_TRACK_MERGING: False
+#      MERGING_MAX_DISTANCE: 15.0
+#      CUTOFF_PERCENTILE: 0.9
+
+cellMask:
+  method: findcell
+  ccdist: 25
+  threshold:
+
 
 #### Localize parameters
 #  The script finds spots in 2 steps with high and low thesholds. First it will find the most intense spots using the "thresholdSD" threshold. Second, it will find spots with a lower threshold ("thresholdSD"-"diffThresholdSD") in the vicinity of high intensity spots (with distance threshold "dist"). Lastly, it will fill in frames that don't have spot about both thresholds by using the xy location of the first burst or the previous burst.

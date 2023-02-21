@@ -55,14 +55,15 @@ test_heta   = make_test_pipeline_CF('pipeline_livecell_correlationfunctions_Heta
 ## ----- This part runs the tests -----
     
 if __name__ == '__main__':
-    if len(sys.argv)<2:
-        py = ['3.8']
+    if len(sys.argv) < 2:
+        py = ['']
     else:
         py = sys.argv[1:]
 
     for p in py:
-        print('Testing using python {}'.format(p))
-        os.system('python{} -m pytest -n=12 -p no:warnings --verbose {}'.format(p, fname))
+        print(f'Testing using python {p}')
+        print(f'Loaded tllab_common code from {__file__}')
+        os.system(f'python{p} -m pytest -n=12 -p no:warnings --verbose {fname}')
         print('')
 
     imread.kill_vm()
