@@ -12,7 +12,7 @@ If not done already:
     cd livecell
 
 # Version of the code used for Meeussen et al.
-    git checkout
+    git checkout 53bb41a038a7149e6ad910a7405fdb4ea5b188fb
     pip install -e .[tllab_common] --user
 
 # Version of the code used for Patel et al.
